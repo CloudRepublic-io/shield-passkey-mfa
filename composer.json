@@ -1,0 +1,28 @@
+{
+    "name": "cloudrepublic/shield-passkey-mfa",
+    "description": "Passkey (WebAuthn) MFA action for CodeIgniter Shield, using web-auth/webauthn-lib for the actual cryptography.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "codeigniter4",
+        "codeigniter",
+        "shield",
+        "mfa",
+        "2fa",
+        "webauthn",
+        "passkey",
+        "fido2"
+    ],
+    "require": {
+        "php": "^8.2",
+        "codeigniter4/framework": "^4.3",
+        "codeigniter4/shield": "^1.0",
+        "web-auth/webauthn-lib": "^5.1"
+    },
+    "autoload": {
+        "psr-4": {
+            "PasskeyMfa\\": "src/"
+        }
+    },
+    "minimum-stability": "stable"
+}
