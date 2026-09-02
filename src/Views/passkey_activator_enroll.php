@@ -35,12 +35,14 @@
     <p id="passkey-status" class="text-muted small mt-2"></p>
 </form>
 
+<?php if (\Config\Services::routes()->reverseRoute('passkey-activator-skip') !== false) : ?>
 <form method="post" action="<?= url_to('passkey-activator-skip') ?>" class="mt-2">
     <?= csrf_field() ?>
     <button type="submit" class="btn btn-link p-0">
         <?= lang('PasskeyMfa.skipButton') ?>
     </button>
 </form>
+<?php endif ?>
 
 <script id="passkey-options-json" type="application/json"><?= $optionsJson ?></script>
 <script>

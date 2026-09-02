@@ -120,6 +120,12 @@ class Setup extends BaseCommand
 
         CLI::newLine();
         CLI::write('4) Add the routes from routes-snippet.php to app/Config/Routes.php.');
+        CLI::write('   If you registered PasskeyActivator in step 3, add its skip route by');
+        CLI::write('   default - the enrollment view always renders a "skip for now" link');
+        CLI::write('   regardless of whether the route exists (safe either way now: a');
+        CLI::write('   missing route makes the view hide the link rather than throwing), so');
+        CLI::write('   only leave it out if you deliberately don\'t want "skip" offered at');
+        CLI::write('   all. See the README\'s Installation section.');
 
         CLI::newLine();
         CLI::write('5) Before relying on this in production: actually register and log in');

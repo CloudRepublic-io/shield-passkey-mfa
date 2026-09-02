@@ -156,7 +156,15 @@ routes-snippet.php                       <- routes to add by hand
 
 6. **Add the routes** from `routes-snippet.php` to
    `app/Config/Routes.php`, and link to `account/passkeys` from
-   wherever your account settings page lives.
+   wherever your account settings page lives. If you registered
+   `PasskeyActivator` in step 5, **add its "skip" route by default** -
+   the enrollment view always renders a "skip for now" link, regardless
+   of whether this route exists (a missing route makes the view detect
+   this and simply hide the link, rather than throwing when the very
+   first user registers), so only leave it out if you deliberately
+   don't want "skip" offered at all (e.g. because MFA is mandatory for
+   everyone via `shield-mfa-dispatcher`'s
+   `$required`/`$requiredMethodsForGroups`).
 
 7. **Actually test it, in a real browser, before production.** See
    the version-sensitivity section above.
@@ -338,7 +346,7 @@ step-up auth is deliberately kept out of the Action system entirely.
 
 ## Tests
 
-**If you're using `shield-mfa-dispatcher`** (or anything else that
+**If you're using `shield-mfa-dispatcher` [package]('https://github.com/CloudRepublic-io/shield-mfa-dispatcher')** (or anything else that
 makes `Config\Auth::$actions` point at something other than
 `PasskeyMfa`/`PasskeyActivator` directly): the confirmed fixes
 `shield-totp-mfa` needed for this exact same architecture (session
