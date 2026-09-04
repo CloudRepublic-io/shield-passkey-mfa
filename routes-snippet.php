@@ -20,6 +20,25 @@ $routes->post(
     ['as' => 'passkey-activator-skip']
 );
 
+// OPTIONAL - only needed if Config\PasskeyMfa::$enableEarlyAuthentication
+// is turned on. Deliberately public (NOT wrapped in the 'session' filter,
+// or any full-login-required filter) - these are called from the login
+// page itself, before the visitor is authenticated at all. Both routes
+// return early (404) on their own if the config flag is off, so adding
+// these routes without also flipping that flag is harmless. See
+// "Optional: trigger a passkey prompt from the login form" in the README.
+$routes->post(
+    'auth/passkey/early/options',
+    '\PasskeyMfa\Controllers\PasskeyEarlyAuthController::options',
+    ['as' => 'passkey-early-auth-options']
+);
+
+$routes->post(
+    'auth/passkey/early/verify',
+    '\PasskeyMfa\Controllers\PasskeyEarlyAuthController::verify',
+    ['as' => 'passkey-early-auth-verify']
+);
+
 // These are for an already-fully-logged-in user managing their own
 // passkeys, so the 'session' filter is correct here.
 $routes->group('', ['filter' => 'session'], static function ($routes) {

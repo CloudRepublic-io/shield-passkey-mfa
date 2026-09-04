@@ -76,6 +76,8 @@ here to TOTP's RFC 6238 test vectors to check the math against.
 
 ```
 src/
+  Assets/passkey-early-auth.js           <- reference JS for the optional "trigger a passkey
+                                             prompt on email blur" feature - not auto-loaded
   Authentication/Actions/
     PasskeyMfa.php                       <- 'login' action: verification only
     PasskeyActivator.php                 <- 'register' action: optional setup at signup
@@ -85,6 +87,7 @@ src/
     PasskeyActivatorController.php       <- handles PasskeyActivator's "skip for now" link
     PasskeySettingsController.php        <- self-service add/rename/remove
     PasskeyStepUpController.php          <- step-up challenge page
+    PasskeyEarlyAuthController.php       <- optional login-page-blur passkey prompt endpoints
   Database/Migrations/..._CreateAuthPasskeyCredentials.php
   Filters/RequireFreshPasskey.php        <- step-up auth filter for sensitive routes
   Language/en/PasskeyMfa.php
@@ -344,6 +347,97 @@ directly (the exact same WebAuthn ceremony the login action itself
 uses). See `shield-totp-mfa`'s README for the fuller explanation of why
 step-up auth is deliberately kept out of the Action system entirely.
 
+## Optional: trigger a passkey prompt from the login form
+
+Off by default. Several sites (GitHub, Microsoft, and others) trigger
+the browser's native passkey prompt as soon as a returning user tabs
+away from the email field on the login form - before they've typed
+anything into the password field at all. If they have a passkey
+registered, they can complete the whole login right there; if not,
+nothing happens and they just continue typing their password normally.
+
+### How it works
+
+Two new AJAX (JSON) endpoints, deliberately separate from the login
+Action (`PasskeyMfa`) and step-up (`PasskeyStepUpController`) machinery
+- the visitor calling these isn't logged in, or even mid-login,
+at all, so neither Shield's pending-login state nor an authenticated
+session is involved:
+
+- **`POST auth/passkey/early/options`** - given an email, returns
+  WebAuthn request options if that email has a registered passkey.
+  Returns the same `{"available": false}` response whether the email
+  doesn't exist at all, or exists but has no passkey - the two cases
+  are indistinguishable from the outside, so this can't be used to
+  enumerate registered emails.
+- **`POST auth/passkey/early/verify`** - given the browser's WebAuthn
+  response, verifies it against the exact identity the matching
+  `options` call issued a challenge for (session-pinned server-side,
+  not trusted from anything the client sends at verify time), and logs
+  the user in on success.
+
+Both reuse `PasskeyIdentityStore::beginAuthentication()`/`completeAuthentication()`
+directly - the identical WebAuthn ceremony every other flow in this
+package already uses, just invoked against a user looked up by email
+rather than one Shield has already put in a pending or logged-in
+state.
+
+### Setup
+
+1. Set `$enableEarlyAuthentication = true` in `app/Config/PasskeyMfa.php`.
+
+2. Add the two routes from `routes-snippet.php` (already included if
+   you copied the whole snippet earlier - they return 404 on their own
+   if the config flag above is off, so having them present is harmless
+   either way).
+
+3. Copy `src/Assets/passkey-early-auth.js` into your own login page's
+   JavaScript (or adapt the logic inline) - this is a reference
+   implementation, not something this package loads automatically
+   anywhere. Adjust the three things called out at the top of that
+   file to match your actual login form: the email field's selector,
+   your app's CSRF token field name
+   (`Config\Security::$tokenName` - CodeIgniter's default is
+   `csrf_test_name`), and the route paths if you changed the route
+   names from the defaults.
+
+4. Test it in a real browser with a real passkey already registered -
+   same caveat as everywhere else in this README: "the code looks
+   right" is meaningfully less reassuring for anything WebAuthn-shaped
+   than for ordinary application code.
+
+### Does this bypass your app's own MFA?
+
+`Config\PasskeyMfa::$earlyAuthenticationIsSufficient` (default `true`)
+decides this. A passkey is already a strong, phishing-resistant
+credential that's inherently multi-factor (possession of the device +
+its own biometric/PIN unlock), verified directly by this app rather
+than delegated to a third party - unlike `shield-oauth-login`'s
+equivalent toggle (`$triggerMfaAfterSso`, which defaults to **still**
+requiring MFA, since an external IdP's own security posture isn't
+something this app can verify), treating an early passkey login as
+sufficient on its own is a more defensible default here. Set it to
+`false` if you'd rather layer your app's own MFA (e.g.
+`shield-mfa-dispatcher`) on top regardless - a user who authenticates
+this way is then sent to the normal MFA challenge page instead of
+straight to your app's post-login destination.
+
+### The reflection-based login completion, and why it's needed here too
+
+When `$earlyAuthenticationIsSufficient` is `false`,
+`PasskeyEarlyAuthController::completeLogin()` uses the identical
+reflection-based mechanism `shield-oauth-login`'s own
+`OAuthLoginController::completeLogin()` needed, for the identical
+underlying reason: Shield's own `Session::attempt()` is the only path
+that correctly triggers its **private** `setAuthAction()` pending-check
+- and `attempt()` requires a password to check, which a visitor at
+this point in the flow doesn't have (they haven't submitted the login
+form at all yet). There is no public Shield API for "log this
+already-verified user in, but still check whether MFA should apply
+first." See that method's own doc comment, and `shield-oauth-login`'s
+README, for the fuller account of why this approach was needed rather
+than a cleaner alternative.
+
 ## Tests
 
 **If you're using `shield-mfa-dispatcher` [package]('https://github.com/CloudRepublic-io/shield-mfa-dispatcher')** (or anything else that
@@ -379,6 +473,8 @@ tests/PasskeyMfa/
   Filters/RequireFreshPasskeyTest.php           <- step-up freshness/enrollment logic
   Controllers/PasskeyStepUpControllerTest.php   <- step-up challenge page (show() smoke test,
                                                     graceful verify() failure - not the crypto success path)
+  Controllers/PasskeyEarlyAuthControllerTest.php <- login-page-blur endpoints: config-gating,
+                                                     email-enumeration safety, graceful verify() failure
 ```
 
 ### Setup

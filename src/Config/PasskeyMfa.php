@@ -69,6 +69,46 @@ class PasskeyMfa extends BaseConfig
      */
     public string $stepUpEnrollRouteName = 'passkey-settings-enroll';
 
+    // -- Optional: trigger a passkey prompt from the login form -------------
+
+    /**
+     * Off by default - a genuinely different UX/security shape from
+     * this package's main job (a SECOND factor after a password), so
+     * it's opt-in even once PasskeyEarlyAuthController's routes are
+     * added, not automatic.
+     *
+     * When true, exposes two endpoints a developer can call from their
+     * OWN login page's JavaScript - typically wired to fire on blur of
+     * the email field, so a returning user with a registered passkey
+     * gets the browser's native passkey prompt immediately, before
+     * ever touching the password field (the same pattern GitHub,
+     * Microsoft, and others use). See "Optional: trigger a passkey
+     * prompt from the login form" in the README for the full setup,
+     * including the example JavaScript this package ships but does
+     * NOT auto-inject anywhere - you choose whether and how to wire it
+     * into your own login page's markup.
+     */
+    public bool $enableEarlyAuthentication = false;
+
+    /**
+     * Whether a successful early passkey authentication (see above)
+     * completes the login OUTRIGHT, or still requires whatever your
+     * app's own MFA would otherwise apply (e.g.
+     * shield-mfa-dispatcher).
+     *
+     * Defaults to true - unlike shield-oauth-login's equivalent toggle
+     * ($triggerMfaAfterSso, which defaults to STILL requiring MFA),
+     * this one defaults the other way: a passkey is already a strong,
+     * phishing-resistant credential that's inherently multi-factor
+     * (possession of the device + its own biometric/PIN unlock) and
+     * verified DIRECTLY by this app, not delegated to a third-party
+     * IdP whose own security posture this app has no way to verify.
+     * Treating it as sufficient on its own is a more defensible
+     * default here. Still your call - set to false to layer your own
+     * MFA on top regardless.
+     */
+    public bool $earlyAuthenticationIsSufficient = true;
+
     /**
      * View paths used by this package, keyed by a logical name - the
      * same pattern Shield itself uses for Config\Auth::$views, and
