@@ -27,14 +27,28 @@ $routes->post(
 // return early (404) on their own if the config flag is off, so adding
 // these routes without also flipping that flag is harmless. See
 // "Optional: trigger a passkey prompt from the login form" in the README.
+//
+// Deliberately placed under auth/a/... - Shield's own established
+// convention for its gateway-action routes (auth-action-show/handle/verify),
+// which is ALSO commonly the exact pattern apps already exclude from any
+// global login-required filter (e.g. 'except' => ['auth/a/*'] in
+// app/Config/Filters.php). CONFIRMED, REAL ISSUE: an earlier version of
+// this snippet used auth/passkey/early/... instead, which does NOT match
+// that common exclusion pattern - a global filter silently intercepted
+// both routes for a real app, redirecting them to the login page (a 303)
+// instead of ever reaching this controller at all. If your own app's
+// global filters exclude something OTHER than auth/a/*, these two routes
+// still need to be added to whatever your own exclusion list actually is
+// - check app/Config/Filters.php's $globals before assuming this "just
+// works".
 $routes->post(
-    'auth/passkey/early/options',
+    'auth/a/passkey-early/options',
     '\PasskeyMfa\Controllers\PasskeyEarlyAuthController::options',
     ['as' => 'passkey-early-auth-options']
 );
 
 $routes->post(
-    'auth/passkey/early/verify',
+    'auth/a/passkey-early/verify',
     '\PasskeyMfa\Controllers\PasskeyEarlyAuthController::verify',
     ['as' => 'passkey-early-auth-verify']
 );

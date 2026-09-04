@@ -41,14 +41,28 @@
  *     fetch is needed.
  *   - The two route paths (OPTIONS_URL/VERIFY_URL) if you changed the
  *     route names in routes-snippet.php from the defaults.
+ *
+ * IF THIS SILENTLY DOES NOTHING (no browser prompt ever appears, and
+ * no error in the console either): CONFIRMED, REAL ISSUE against a
+ * real app - check app/Config/Filters.php's $globals for a
+ * login-required filter (e.g. 'session' or 'isLoggedIn'). If it's
+ * applied globally, its own 'except' list needs to cover these two
+ * routes too, or the filter redirects them to your login page (a 303)
+ * before this controller is ever reached - fetch() follows that
+ * redirect silently and receives HTML back where JSON was expected,
+ * which the deliberately-silent catch block below swallows completely.
+ * Placing these routes under auth/a/... (routes-snippet.php's
+ * default) already matches the exclusion pattern many Shield apps use
+ * for Shield's own gateway-action routes - but check your own
+ * app's actual exclusion list rather than assuming this is automatic.
  */
 (function () {
     'use strict';
 
     var EMAIL_FIELD_SELECTOR = 'input[name="email"]';
     var CSRF_FIELD_NAME      = 'csrf_test_name';
-    var OPTIONS_URL          = '/auth/passkey/early/options';
-    var VERIFY_URL           = '/auth/passkey/early/verify';
+    var OPTIONS_URL          = '/auth/a/passkey-early/options';
+    var VERIFY_URL           = '/auth/a/passkey-early/verify';
 
     var emailField = document.querySelector(EMAIL_FIELD_SELECTOR);
 

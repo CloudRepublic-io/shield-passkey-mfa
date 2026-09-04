@@ -364,13 +364,13 @@ Action (`PasskeyMfa`) and step-up (`PasskeyStepUpController`) machinery
 at all, so neither Shield's pending-login state nor an authenticated
 session is involved:
 
-- **`POST auth/passkey/early/options`** - given an email, returns
+- **`POST auth/a/passkey-early/options`** - given an email, returns
   WebAuthn request options if that email has a registered passkey.
   Returns the same `{"available": false}` response whether the email
   doesn't exist at all, or exists but has no passkey - the two cases
   are indistinguishable from the outside, so this can't be used to
   enumerate registered emails.
-- **`POST auth/passkey/early/verify`** - given the browser's WebAuthn
+- **`POST auth/a/passkey-early/verify`** - given the browser's WebAuthn
   response, verifies it against the exact identity the matching
   `options` call issued a challenge for (session-pinned server-side,
   not trusted from anything the client sends at verify time), and logs
@@ -382,6 +382,13 @@ package already uses, just invoked against a user looked up by email
 rather than one Shield has already put in a pending or logged-in
 state.
 
+Deliberately placed under `auth/a/...` - Shield's own established
+convention for its gateway-action routes
+(`auth-action-show`/`handle`/`verify`), and also commonly the exact
+pattern apps already exclude from any global login-required filter.
+See the setup steps below - this matters more than it might look like
+it should.
+
 ### Setup
 
 1. Set `$enableEarlyAuthentication = true` in `app/Config/PasskeyMfa.php`.
@@ -391,7 +398,27 @@ state.
    if the config flag above is off, so having them present is harmless
    either way).
 
-3. Copy `src/Assets/passkey-early-auth.js` into your own login page's
+3. **Check `app/Config/Filters.php`'s `$globals` for a login-required
+   filter** (commonly named `session` or `isLoggedIn`) applied to
+   every request. **Confirmed, real issue against a real app:** if such
+   a filter is global, its own `'except'` list needs to cover these two
+   routes too, or the filter silently redirects them to your login page
+   before this controller is ever reached - `fetch()` follows that
+   redirect and receives HTML back where JSON was expected, which looks
+   like the feature doing nothing at all (no error, no prompt, nothing
+   in the console). Placing the routes under `auth/a/...` already
+   matches what many Shield apps exclude for Shield's own gateway
+   routes - for example:
+
+   ```php
+   'session' => ['except' => ['login*', 'register', 'auth/a/*', 'logout']],
+   ```
+
+   If your own app excludes something else, or doesn't exclude
+   `auth/a/*` specifically, add these two routes to whatever your
+   actual exclusion list is instead.
+
+4. Copy `src/Assets/passkey-early-auth.js` into your own login page's
    JavaScript (or adapt the logic inline) - this is a reference
    implementation, not something this package loads automatically
    anywhere. Adjust the three things called out at the top of that
@@ -401,7 +428,7 @@ state.
    `csrf_test_name`), and the route paths if you changed the route
    names from the defaults.
 
-4. Test it in a real browser with a real passkey already registered -
+5. Test it in a real browser with a real passkey already registered -
    same caveat as everywhere else in this README: "the code looks
    right" is meaningfully less reassuring for anything WebAuthn-shaped
    than for ordinary application code.
