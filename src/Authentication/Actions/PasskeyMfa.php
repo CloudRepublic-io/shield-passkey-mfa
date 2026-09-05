@@ -85,13 +85,22 @@ class PasskeyMfa implements ActionInterface
     }
 
     /**
-     * TEMPORARY DIAGNOSTIC LOGGING added at every step below - a real,
+     * TEMPORARY DIAGNOSTIC added at every step below - a real,
      * confirmed gap where a failed verification gave zero visibility
-     * into WHERE in the flow it actually failed (the credential field
-     * arriving empty vs. completeAuthentication() itself rejecting it
-     * are very different problems with different fixes). Safe to
-     * leave in permanently - these only write when something relevant
-     * has happened, not on every request.
+     * into WHERE in the flow it actually failed, and log_message()
+     * alone turned out not to be reliably visible either (a real
+     * report came back with nothing written to the app's own log at
+     * all). The specific failure reason is now shown directly in the
+     * page's own flash message too - guaranteed visible regardless of
+     * the app's logging configuration, since it's the exact same
+     * mechanism (session('error'), already rendered by
+     * passkey_mfa_verify.php) that's already confirmed working.
+     *
+     * REVERT BEFORE LONG-TERM PRODUCTION USE: showing raw internal
+     * failure reasons to end users is not something you'd normally
+     * want permanently (see PasskeyIdentityStore::$lastFailureReason's
+     * own doc comment) - this is deliberately verbose specifically to
+     * get an open bug diagnosed, not a permanent UX choice.
      */
     public function verify(IncomingRequest $request): Response
     {
@@ -101,13 +110,14 @@ class PasskeyMfa implements ActionInterface
         if ($responseJson === '') {
             log_message('error', 'PasskeyMfa verify: credential POST field was empty for user_id {user_id}.', ['user_id' => $user->id]);
 
-            return redirect()->back()->with('error', lang('PasskeyMfa.verificationFailed'));
+            return redirect()->back()->with('error', lang('PasskeyMfa.verificationFailed') . ' [diagnostic: credential field was empty]');
         }
 
         if (! $this->store->completeAuthentication($user, $responseJson)) {
-            log_message('error', 'PasskeyMfa verify: completeAuthentication() returned false for user_id {user_id} - see PasskeyIdentityStore log entries immediately above for the specific reason.', ['user_id' => $user->id]);
+            $reason = $this->store->lastFailureReason ?? 'unknown - completeAuthentication() returned false with no reason recorded';
+            log_message('error', 'PasskeyMfa verify: completeAuthentication() returned false for user_id {user_id}: {reason}', ['user_id' => $user->id, 'reason' => $reason]);
 
-            return redirect()->back()->with('error', lang('PasskeyMfa.verificationFailed'));
+            return redirect()->back()->with('error', lang('PasskeyMfa.verificationFailed') . ' [diagnostic: ' . $reason . ']');
         }
 
         log_message('info', 'PasskeyMfa verify: completeAuthentication() succeeded for user_id {user_id}, completing login.', ['user_id' => $user->id]);

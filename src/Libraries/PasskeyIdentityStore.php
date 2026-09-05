@@ -65,6 +65,24 @@ class PasskeyIdentityStore
     protected PasskeyMfaConfig $config;
     protected WebauthnFactory $webauthn;
 
+    /**
+     * The specific reason completeAuthentication() last returned
+     * false, if any - null after a successful call, or before any
+     * call has been made. TEMPORARY DIAGNOSTIC addition: log_message()
+     * alone turned out not to be a reliable way to surface what's
+     * actually failing (a real report came back with nothing written
+     * to the app's own log at all, despite log_message() calls at
+     * every failure branch - most likely an app-specific logging
+     * threshold/handler configuration issue, not a code problem, but
+     * that's exactly the kind of thing this package can't control or
+     * assume). This property gives PasskeyMfa::verify() a way to
+     * surface the real reason directly in the page's own flash
+     * message instead, which doesn't depend on any logging
+     * configuration at all - the same mechanism the view already
+     * renders session('error') through, already confirmed working.
+     */
+    public ?string $lastFailureReason = null;
+
     public function __construct()
     {
         $this->config   = config('PasskeyMfa');
@@ -306,9 +324,12 @@ class PasskeyIdentityStore
      */
     public function completeAuthentication(User $user, string $responseJson): bool
     {
+        $this->lastFailureReason = null;
+
         $optionsJson = session(self::SESSION_LOGIN_OPTIONS);
 
         if ($optionsJson === null) {
+            $this->lastFailureReason = 'no pending options in session';
             log_message('error', 'PasskeyMfa completeAuthentication: no pending options in session for user_id {user_id}.', ['user_id' => $user->id]);
 
             return false;
@@ -330,6 +351,7 @@ class PasskeyIdentityStore
             );
 
             if (! $publicKeyCredential->response instanceof AuthenticatorAssertionResponse) {
+                $this->lastFailureReason = 'deserialized response was not an AuthenticatorAssertionResponse';
                 log_message('error', 'PasskeyMfa completeAuthentication: deserialized response was not an AuthenticatorAssertionResponse for user_id {user_id}.', ['user_id' => $user->id]);
 
                 return false;
@@ -339,12 +361,14 @@ class PasskeyIdentityStore
             $row             = $this->credentials()->findByCredentialId($credentialIdB64);
 
             if ($row === null) {
+                $this->lastFailureReason = "no stored credential row found for credential_id {$credentialIdB64}";
                 log_message('error', 'PasskeyMfa completeAuthentication: no stored credential row found for credential_id {credential_id} (user_id {user_id}).', ['credential_id' => $credentialIdB64, 'user_id' => $user->id]);
 
                 return false;
             }
 
             if ((int) $row['user_id'] !== $user->id) {
+                $this->lastFailureReason = "credential_id {$credentialIdB64} belongs to a different user_id ({$row['user_id']}) than the expected {$user->id}";
                 log_message('error', 'PasskeyMfa completeAuthentication: credential_id {credential_id} belongs to user_id {row_user_id}, not the expected user_id {user_id}.', ['credential_id' => $credentialIdB64, 'row_user_id' => $row['user_id'], 'user_id' => $user->id]);
 
                 return false;
@@ -370,6 +394,7 @@ class PasskeyIdentityStore
                 (string) $user->id,
             );
         } catch (\Throwable $e) {
+            $this->lastFailureReason = get_class($e) . ': ' . $e->getMessage();
             log_message('error', 'PasskeyMfa completeAuthentication: {exception}', ['exception' => $e]);
 
             return false;
