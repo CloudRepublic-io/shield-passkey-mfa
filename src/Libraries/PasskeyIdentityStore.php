@@ -294,12 +294,23 @@ class PasskeyIdentityStore
      * stashed by beginAuthentication() and the specific credential's
      * previously-stored public key. Returns false (never throws) on
      * any failure - see completeRegistration()'s doc comment for why.
+     *
+     * TEMPORARY DIAGNOSTIC LOGGING added at every failure point below -
+     * a real, confirmed gap where every failure silently returned
+     * false with zero visibility into why, which made a real reported
+     * bug (login failing specifically once a user has multiple
+     * registered passkeys) impossible to diagnose from the outside.
+     * Safe to leave in permanently - log_message('error', ...) only
+     * writes when something has already gone wrong, so this adds no
+     * overhead to the success path.
      */
     public function completeAuthentication(User $user, string $responseJson): bool
     {
         $optionsJson = session(self::SESSION_LOGIN_OPTIONS);
 
         if ($optionsJson === null) {
+            log_message('error', 'PasskeyMfa completeAuthentication: no pending options in session for user_id {user_id}.', ['user_id' => $user->id]);
+
             return false;
         }
 
@@ -319,13 +330,23 @@ class PasskeyIdentityStore
             );
 
             if (! $publicKeyCredential->response instanceof AuthenticatorAssertionResponse) {
+                log_message('error', 'PasskeyMfa completeAuthentication: deserialized response was not an AuthenticatorAssertionResponse for user_id {user_id}.', ['user_id' => $user->id]);
+
                 return false;
             }
 
             $credentialIdB64 = Base64Url::encode($publicKeyCredential->rawId);
             $row             = $this->credentials()->findByCredentialId($credentialIdB64);
 
-            if ($row === null || (int) $row['user_id'] !== $user->id) {
+            if ($row === null) {
+                log_message('error', 'PasskeyMfa completeAuthentication: no stored credential row found for credential_id {credential_id} (user_id {user_id}).', ['credential_id' => $credentialIdB64, 'user_id' => $user->id]);
+
+                return false;
+            }
+
+            if ((int) $row['user_id'] !== $user->id) {
+                log_message('error', 'PasskeyMfa completeAuthentication: credential_id {credential_id} belongs to user_id {row_user_id}, not the expected user_id {user_id}.', ['credential_id' => $credentialIdB64, 'row_user_id' => $row['user_id'], 'user_id' => $user->id]);
+
                 return false;
             }
 
@@ -348,7 +369,9 @@ class PasskeyIdentityStore
                 $this->config->rpId,
                 (string) $user->id,
             );
-        } catch (\Throwable) {
+        } catch (\Throwable $e) {
+            log_message('error', 'PasskeyMfa completeAuthentication: {exception}', ['exception' => $e]);
+
             return false;
         }
 
