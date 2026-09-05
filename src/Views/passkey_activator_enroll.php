@@ -29,9 +29,6 @@
     <button type="button" id="passkey-start" class="btn btn-primary">
         <?= lang('PasskeyMfa.registerButton') ?>
     </button>
-    <button type="submit" id="passkey-submit" class="btn btn-primary" style="display:none;">
-        <?= lang('PasskeyMfa.registerButton') ?>
-    </button>
     <p id="passkey-status" class="text-muted small mt-2"></p>
 </form>
 
@@ -49,8 +46,8 @@
 (() => {
     const statusEl = document.getElementById('passkey-status');
     const startBtn = document.getElementById('passkey-start');
-    const submitBtn = document.getElementById('passkey-submit');
     const credentialField = document.getElementById('passkey-credential-field');
+    const form = document.getElementById('passkey-form');
 
     startBtn.addEventListener('click', async () => {
         statusEl.textContent = '';
@@ -59,6 +56,19 @@
             statusEl.textContent = 'This browser does not support passkeys.';
             return;
         }
+
+        // CONFIRMED, REAL FIX for a genuinely confusing flow: an
+        // earlier version of this script showed a SECOND button
+        // (sharing the exact same label text as this one) after a
+        // successful ceremony, asking the user to click it to
+        // actually finish - identical-looking buttons made it look
+        // like nothing had happened, and the nearby "skip"/"cancel"
+        // link was the only other clickable thing that stood out,
+        // leading users to dismiss the whole flow rather than
+        // complete it. There is no good reason to require a second,
+        // manual click here at all - the moment the ceremony
+        // succeeds, the form now submits itself.
+        startBtn.disabled = true;
 
         const optionsJson = JSON.parse(document.getElementById('passkey-options-json').textContent);
 
@@ -75,11 +85,15 @@
             const credential = await navigator.credentials.create({ publicKey: options });
 
             credentialField.value = JSON.stringify(credential.toJSON());
-            startBtn.style.display = 'none';
-            submitBtn.style.display = '';
-            statusEl.textContent = 'Passkey created - click below to finish.';
+            statusEl.textContent = 'Passkey created - finishing up...';
+
+            // requestSubmit() (rather than form.submit()) still fires
+            // the form's own submit event and respects any validation,
+            // the same as a real, user-initiated submit would.
+            form.requestSubmit();
         } catch (err) {
             statusEl.textContent = 'Could not create a passkey: ' + err.message;
+            startBtn.disabled = false;
         }
     });
 })();

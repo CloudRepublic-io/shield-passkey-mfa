@@ -48,6 +48,16 @@ use Webauthn\Denormalizer\WebauthnSerializerFactory;
  * specific need to verify authenticator make/model, which adds real
  * complexity (a Metadata Statement Repository, certificate chain
  * validation) this package doesn't attempt.
+ *
+ * assertionValidator() wires in SyncedPasskeyCounterChecker (see that
+ * class's own doc comment) rather than the library's own default
+ * counter checker - CONFIRMED, REAL BUG this fixes: the library's
+ * default hard-rejects every login from a synced passkey (Chrome,
+ * Edge, and Safari's own built-in, cloud-synced passkey managers -
+ * most real users' actual setup), unconditionally, since those report
+ * a signature counter of 0 forever, which the default checker treats
+ * as invalid rather than as the W3C's own documented "this
+ * authenticator doesn't support a counter" case.
  */
 class WebauthnFactory
 {
@@ -93,6 +103,16 @@ class WebauthnFactory
     {
         if ($this->assertionValidator === null) {
             $csmFactory = new CeremonyStepManagerFactory();
+
+            // CONFIRMED, REAL FIX - see SyncedPasskeyCounterChecker's
+            // own class doc comment for the full explanation: without
+            // this, the library's own default counter checker rejects
+            // every login attempt from a synced passkey (Chrome/Edge/Safari's
+            // own built-in, cloud-synced passkey managers - i.e. most
+            // real users' actual setup), unconditionally. Must be set
+            // BEFORE requestCeremony() is called below - that's what
+            // actually builds the validation pipeline using it.
+            $csmFactory->setCounterChecker(new SyncedPasskeyCounterChecker());
 
             $this->assertionValidator = AuthenticatorAssertionResponseValidator::create(
                 ceremonyStepManager: $csmFactory->requestCeremony()

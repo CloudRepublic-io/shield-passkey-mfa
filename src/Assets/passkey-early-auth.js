@@ -32,8 +32,32 @@
  *      here at all. This must never block or visibly interrupt the
  *      form.
  *
- * ADJUST THESE THREE THINGS to match your actual login page:
+ * CANCELLING - CONFIRMED, REAL FIX for prompts being hard to cancel out
+ * of, or reappearing after cancelling: this script actively aborts any
+ * in-flight passkey ceremony (via navigator.credentials.get()'s own
+ * "signal" option - the same AbortController-based mechanism MDN's own
+ * docs and libraries like SimpleWebAuthn use for exactly this) the
+ * moment the visitor focuses or types into the password field, or
+ * submits the form - they are never required to manually dismiss the
+ * browser's own dialog. Two distinct problems were involved, both fixed
+ * here: (1) an earlier version's re-trigger guard (a plain "in
+ * progress" flag) only prevented a SECOND ceremony while the first was
+ * still running - it did nothing to stop the SAME email value from
+ * triggering ANOTHER prompt on a later, separate blur event (e.g. the
+ * visitor clicking back into the email field while trying to dismiss
+ * the first prompt, then tabbing out again) - now tracked per-value
+ * instead, so the identical email never re-prompts twice; (2) starting
+ * a second navigator.credentials.get() call while a first one is still
+ * pending is a well-documented source of "operation already in
+ * progress" errors and overlapping/duplicate browser dialogs in some
+ * browsers - aborting the first ceremony before it would ever be
+ * allowed to overlap with anything prevents this outright, rather than
+ * only preventing it from occurring in the first place.
+ *
+ * ADJUST THESE FOUR THINGS to match your actual login page:
  *   - EMAIL_FIELD_SELECTOR: whatever selects your email/username input.
+ *   - PASSWORD_FIELD_SELECTOR: whatever selects your password input -
+ *     used only to know when to abort an in-flight ceremony.
  *   - CSRF_FIELD_NAME: must match Config\Security::$tokenName in your
  *     app (CodeIgniter's default is 'csrf_test_name') - this script
  *     reads the token's CURRENT value from the hidden field csrf_field()
@@ -59,12 +83,14 @@
 (function () {
     'use strict';
 
-    var EMAIL_FIELD_SELECTOR = 'input[name="email"]';
-    var CSRF_FIELD_NAME      = 'csrf_test_name';
-    var OPTIONS_URL          = '/auth/a/passkey-early/options';
-    var VERIFY_URL           = '/auth/a/passkey-early/verify';
+    var EMAIL_FIELD_SELECTOR    = 'input[name="email"]';
+    var PASSWORD_FIELD_SELECTOR = 'input[name="password"]';
+    var CSRF_FIELD_NAME         = 'csrf_test_name';
+    var OPTIONS_URL             = '/auth/a/passkey-early/options';
+    var VERIFY_URL              = '/auth/a/passkey-early/verify';
 
-    var emailField = document.querySelector(EMAIL_FIELD_SELECTOR);
+    var emailField    = document.querySelector(EMAIL_FIELD_SELECTOR);
+    var passwordField = document.querySelector(PASSWORD_FIELD_SELECTOR);
 
     // Feature-detect WebAuthn support, and bail out entirely if the
     // login page doesn't have the field this script expects - never
@@ -73,20 +99,48 @@
         return;
     }
 
-    var inProgress = false;
+    // Tracks the email value a ceremony was last attempted for - NOT
+    // just an "in progress" boolean, since the bug this fixes was
+    // specifically about the SAME value re-prompting across separate,
+    // later blur events, not just concurrent ones. A different email
+    // value (e.g. the visitor corrected a typo) is still always
+    // allowed to trigger a fresh attempt.
+    var lastAttemptedEmail = null;
+
+    // The AbortController for whichever ceremony is currently in
+    // flight, if any - null whenever none is.
+    var activeAbortController = null;
 
     emailField.addEventListener('blur', function () {
         var email = emailField.value.trim();
 
-        if (email === '' || inProgress) {
+        if (email === '' || email === lastAttemptedEmail) {
             return;
         }
 
-        inProgress = true;
-        attemptEarlyAuthentication(email).finally(function () {
-            inProgress = false;
-        });
+        lastAttemptedEmail = email;
+        attemptEarlyAuthentication(email);
     });
+
+    // The moment the visitor moves on to the password field, or
+    // submits the form some other way, any in-flight ceremony is
+    // aborted immediately - see this file's own header comment for
+    // why this is the actual fix, not just the re-trigger guard above.
+    if (passwordField) {
+        passwordField.addEventListener('focus', abortActiveCeremony);
+        passwordField.addEventListener('input', abortActiveCeremony);
+    }
+
+    if (emailField.form) {
+        emailField.form.addEventListener('submit', abortActiveCeremony);
+    }
+
+    function abortActiveCeremony() {
+        if (activeAbortController) {
+            activeAbortController.abort();
+            activeAbortController = null;
+        }
+    }
 
     async function attemptEarlyAuthentication(email) {
         try {
@@ -112,10 +166,22 @@
             // versions this requires.
             var publicKey = PublicKeyCredential.parseRequestOptionsFromJSON(optionsData.options);
 
-            // Opens the browser's native passkey prompt. Throws if the
-            // user cancels/dismisses it, or on various other WebAuthn
-            // errors - caught below, always falling through silently.
-            var credential = await navigator.credentials.get({ publicKey: publicKey });
+            // A fresh AbortController for THIS specific ceremony -
+            // abortActiveCeremony() (above) can cancel it the instant
+            // the visitor moves on, without them ever needing to
+            // manually dismiss the browser's own dialog.
+            activeAbortController = new AbortController();
+
+            // Opens the browser's native passkey prompt. Rejects if
+            // the user cancels/dismisses it, if abortActiveCeremony()
+            // fires, or on various other WebAuthn errors - caught
+            // below, always falling through silently either way.
+            var credential = await navigator.credentials.get({
+                publicKey: publicKey,
+                signal: activeAbortController.signal,
+            });
+
+            activeAbortController = null;
 
             var verifyResponse = await fetch(VERIFY_URL, {
                 method: 'POST',
@@ -131,9 +197,12 @@
             // A failed verification also falls through silently - the
             // visitor still has their password to fall back on.
         } catch (error) {
+            activeAbortController = null;
             // Includes the user cancelling the browser's own passkey
-            // prompt (a normal, expected outcome, not a real error) -
-            // deliberately silent either way. If you want visibility
+            // prompt, this script itself aborting the ceremony via
+            // abortActiveCeremony(), or any other WebAuthn error - all
+            // deliberately silent, since the visitor always still has
+            // their password to fall back on. If you want visibility
             // into genuine failures during development, uncomment:
             // console.debug('Early passkey authentication skipped:', error);
         }

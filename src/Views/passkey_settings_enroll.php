@@ -27,9 +27,6 @@
     <button type="button" id="passkey-start" class="btn btn-primary">
         <?= lang('PasskeyMfa.registerButton') ?>
     </button>
-    <button type="submit" id="passkey-submit" class="btn btn-primary" style="display:none;">
-        <?= lang('PasskeyMfa.registerButton') ?>
-    </button>
     <p id="passkey-status" class="text-muted small mt-2"></p>
 </form>
 
@@ -40,8 +37,8 @@
 (() => {
     const statusEl = document.getElementById('passkey-status');
     const startBtn = document.getElementById('passkey-start');
-    const submitBtn = document.getElementById('passkey-submit');
     const credentialField = document.getElementById('passkey-credential-field');
+    const form = document.getElementById('passkey-form');
 
     startBtn.addEventListener('click', async () => {
         statusEl.textContent = '';
@@ -51,6 +48,15 @@
             return;
         }
 
+        // CONFIRMED, REAL FIX for a genuinely confusing flow - see
+        // passkey_activator_enroll.php's identical comment for the
+        // full explanation: an earlier version required a SECOND,
+        // identically-labeled button click to actually finish, right
+        // next to an explicit "Cancel" link, which made the flow look
+        // broken. The form now submits itself the moment the ceremony
+        // succeeds - no second click required.
+        startBtn.disabled = true;
+
         const optionsJson = JSON.parse(document.getElementById('passkey-options-json').textContent);
 
         try {
@@ -58,11 +64,11 @@
             const credential = await navigator.credentials.create({ publicKey: options });
 
             credentialField.value = JSON.stringify(credential.toJSON());
-            startBtn.style.display = 'none';
-            submitBtn.style.display = '';
-            statusEl.textContent = 'Passkey created - click below to finish.';
+            statusEl.textContent = 'Passkey created - finishing up...';
+            form.requestSubmit();
         } catch (err) {
             statusEl.textContent = 'Could not create a passkey: ' + err.message;
+            startBtn.disabled = false;
         }
     });
 })();

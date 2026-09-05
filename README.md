@@ -53,6 +53,48 @@ looks right" is meaningfully less reassuring than usual, given how
 cryptography-heavy the actual verification is - there's no equivalent
 here to TOTP's RFC 6238 test vectors to check the math against.
 
+## Every synced passkey login used to fail verification - fixed
+
+**Fixed in the current version - update immediately if you're on an
+older copy; this affects every login, not an edge case.** An earlier
+version of `WebauthnFactory` used `web-auth/webauthn-lib`'s own
+default signature counter checker
+(`Webauthn\Counter\ThrowExceptionIfInvalid`) unmodified. That default
+hard-rejects a login the moment the signature counter fails to
+strictly increase between attempts.
+
+Passkeys synced via Chrome's or Edge's or Safari's own built-in,
+cloud-based passkey managers (iCloud Keychain, Google Password
+Manager, Windows Hello's own cloud sync) report a signature counter of
+**0 on every single authentication, permanently** - this is
+intentional, spec-compliant behavior, not a bug in those platforms.
+The W3C WebAuthn specification itself says explicitly: if both the
+stored and returned counters are 0, the authenticator does not support
+a counter, and the check should be skipped entirely - a
+strictly-increasing counter has no coherent meaning for a credential
+that can legitimately be used from several independently-synced
+devices at once, which is the whole point of a synced passkey. The
+library's own default checker doesn't apply that exception, so
+`stored=0, new=0` was treated as "counter did not increase" and
+rejected - meaning **every login with a synced passkey failed
+verification, unconditionally**, regardless of how many credentials a
+user had registered or which device/browser they used. From the
+user's side, this looked exactly like: the browser's own passkey
+prompt appears and is completed successfully, but the page just
+reloads back to the login screen, silently.
+
+`WebauthnFactory::assertionValidator()` now wires in
+`SyncedPasskeyCounterChecker` instead - implementing the W3C's own
+guidance directly: both counters at 0 is accepted (authenticator
+doesn't support one), a genuinely non-zero counter is still required
+to strictly increase (preserving the counter's real purpose - detecting
+a cloned hardware security key, for the credentials where that check
+actually means something). See that class's own doc comment for the
+full detail, and `SyncedPasskeyCounterCheckerTest` for coverage of this
+logic in isolation (this specific piece, unlike most of this package,
+has no cryptography dependency, so it's fully testable without a real
+browser).
+
 ## The two gotchas that will bite you before anything else does
 
 1. **`$rpId` must be your app's real domain, exactly.** No scheme
@@ -71,6 +113,57 @@ here to TOTP's RFC 6238 test vectors to check the math against.
    ceremonies at all outside a secure context. Use a real `localhost`
    URL, or set up HTTPS (even a self-signed cert) for local testing on
    any other hostname.
+
+## A passkey created on one device doesn't automatically work everywhere
+
+This isn't a bug in this package - it's a well-documented, industry-wide
+property of how passkeys actually work, and it's confirmed to catch
+real users in real deployments, so it's worth understanding before
+anyone hits it in production.
+
+Passkey syncing depends entirely on the platform ecosystem it was
+created in - Apple's iCloud Keychain, Google Password Manager, and
+Microsoft's own passkey provider all sync within themselves, but **not**
+across each other. A passkey created in Chrome on a Mac (synced via
+iCloud Keychain or Google Password Manager) will not simply appear when
+that same person opens Edge on a Windows machine - that's a different
+platform ecosystem entirely, with no passkey registered there at all.
+If a user's *only* enrolled MFA method is a passkey, and they're on a
+device/browser combination that was never used to register one, they
+can be genuinely locked out - unable to complete their existing
+challenge, and (per WebAuthn's own security model) unable to add a new
+passkey without first being logged in.
+
+### The workaround, today
+
+1. On whichever device/browser combination **does** have a working
+   passkey (or any other enrolled MFA method), log in and switch your
+   2FA method away from passkey - if you're using
+   `shield-mfa-dispatcher`, its settings page lets you do this; see
+   that package's README for switching methods programmatically if
+   you're not using the dispatcher.
+2. On the **new** device/browser combination, log in using that other
+   method, then visit `account/passkeys` (this package's own settings
+   page - see "Self-service enable/disable" earlier in this README)
+   and add a passkey from there. That device/browser now has its own,
+   independent passkey registered, alongside whichever one(s) already
+   existed.
+
+### The more robust fix, not yet built
+
+Every source on passkey deployment converges on the same real answer
+to this: **recovery codes** - single-use backup codes generated at
+enrollment time, method-agnostic, specifically for "I have no access
+to my usual method right now." This is a genuinely substantial,
+separate feature (secure generation, hashed storage, single-use
+validation, a UI to display/download/regenerate codes, and a "use a
+recovery code instead" link on the challenge page) that doesn't exist
+in this package - or anywhere in this series - yet. If losing access to
+your only enrolled method is a real risk for your users, plan around
+the workaround above until that exists, and consider encouraging users
+to enroll a passkey on more than one device from the start (this
+package's own settings page already supports multiple credentials per
+user - `account/passkeys` isn't limited to one).
 
 ## What's in the box
 
@@ -94,6 +187,8 @@ src/
   Libraries/
     Base64Url.php                        <- RFC 4648 base64url, self-contained
     WebauthnFactory.php                  <- builds the webauthn-lib services - THE version-sensitive file
+    SyncedPasskeyCounterChecker.php       <- fixes a confirmed bug in the library's own default
+                                             signature counter check for synced passkeys
     PasskeyIdentityStore.php             <- shared registration/verification orchestration
     CompletesPendingAction.php           <- shared "finish this pending action" trait
   Models/PasskeyCredentialModel.php
@@ -188,6 +283,39 @@ If your users are on browsers old enough to lack these methods,
 replace the relevant block in each view's `<script>` with the classic
 manual conversion pattern (widely documented at
 [webauthn.guide](https://webauthn.guide/)) instead.
+
+`src/Assets/passkey-early-auth.js` (the optional login-page-blur
+feature) additionally relies on `navigator.credentials.get()`'s own
+`signal` option (an `AbortController`/`AbortSignal`, used to cancel an
+in-flight ceremony the moment the visitor moves on to the password
+field) - confirmed via MDN's own documentation and W3C's own
+web-platform-tests as a real, specified, widely-implemented part of
+the Credential Management API (the same mechanism libraries like
+SimpleWebAuthn use for identical reasons). Precise per-browser version
+numbers for this specific option aren't confirmed here the way the
+JSON helpers above are - if you need to support unusually old
+browsers, test this specifically rather than assuming it's covered by
+the same version floor.
+
+## Enrollment used to require a confusing second click - fixed
+
+**Fixed in the current version - update if you're on an older copy.**
+`passkey_activator_enroll.php` and `passkey_settings_enroll.php` used
+to show a status message ("Passkey created - click below to finish")
+after a successful registration ceremony, then require the visitor to
+click a *second* button to actually complete enrollment - a button
+that shared the exact same label text as the first one, making it look
+like nothing had happened. Combined with an explicit "Cancel" link
+sitting right next to it (on the settings-page version) or a "skip"
+link right below it (on the registration-time version), the whole flow
+looked broken - confirmed to cause real users to abandon enrollment
+entirely, or need multiple attempts to find the right button to click.
+
+There's no good reason to require a second, manual click at all once
+the ceremony has already succeeded - both views now call the form's
+own `requestSubmit()` automatically the instant `navigator.credentials.create()`
+resolves, so enrollment completes with a single click, the way it
+should have from the start.
 
 ## Overriding views
 
@@ -421,9 +549,11 @@ it should.
 4. Copy `src/Assets/passkey-early-auth.js` into your own login page's
    JavaScript (or adapt the logic inline) - this is a reference
    implementation, not something this package loads automatically
-   anywhere. Adjust the three things called out at the top of that
+   anywhere. Adjust the four things called out at the top of that
    file to match your actual login form: the email field's selector,
-   your app's CSRF token field name
+   the password field's selector (used to know when to cancel an
+   in-flight passkey prompt - see "Cancelling" in that file's own
+   header comment), your app's CSRF token field name
    (`Config\Security::$tokenName` - CodeIgniter's default is
    `csrf_test_name`), and the route paths if you changed the route
    names from the defaults.
@@ -467,7 +597,7 @@ than a cleaner alternative.
 
 ## Tests
 
-**If you're using `shield-mfa-dispatcher` [package]('https://github.com/CloudRepublic-io/shield-mfa-dispatcher')** (or anything else that
+**If you're using `shield-mfa-dispatcher`** (or anything else that
 makes `Config\Auth::$actions` point at something other than
 `PasskeyMfa`/`PasskeyActivator` directly): the confirmed fixes
 `shield-totp-mfa` needed for this exact same architecture (session
@@ -492,6 +622,8 @@ cover the actual cryptographic verification succeeding - see below.
 ```
 tests/PasskeyMfa/
   Libraries/Base64UrlTest.php                  <- pure codec round-trip, no DB/HTTP
+  Libraries/SyncedPasskeyCounterCheckerTest.php <- the fixed counter-check logic, in isolation -
+                                                     no cryptography involved, fully covered
   Libraries/PasskeyIdentityStoreTest.php        <- marker sync, ownership, JSON shape, graceful failures,
                                                      and the regression test for the fixed duplicate-key bug
   Authentication/Actions/PasskeyMfaTest.php     <- login action: getType/createIdentity, show() smoke test
