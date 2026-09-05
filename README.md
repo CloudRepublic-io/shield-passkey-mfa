@@ -109,6 +109,16 @@ backward compatibility - removed entirely in v6.0), and the counter is
 read as a direct property (`->counter`), not a method call. Both are
 fixed now - see that class's own doc comment for the full account.
 
+**Still an open issue, not yet resolved:** a real user reports login
+still failing specifically once more than one passkey is registered,
+even with the fix above in place - the browser's own prompt completes
+successfully, but the app never logs them in. `PasskeyIdentityStore::completeAuthentication()`
+now logs the specific reason for every failure path (it silently
+returned `false` on any failure before, with zero visibility into
+why) rather than a confirmed fix for this specific report - if you hit
+this, check your PHP error log after reproducing it and compare
+against what's logged there.
+
 ## The two gotchas that will bite you before anything else does
 
 1. **`$rpId` must be your app's real domain, exactly.** No scheme

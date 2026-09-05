@@ -84,14 +84,33 @@ class PasskeyMfa implements ActionInterface
         return service('response')->setBody($this->show());
     }
 
+    /**
+     * TEMPORARY DIAGNOSTIC LOGGING added at every step below - a real,
+     * confirmed gap where a failed verification gave zero visibility
+     * into WHERE in the flow it actually failed (the credential field
+     * arriving empty vs. completeAuthentication() itself rejecting it
+     * are very different problems with different fixes). Safe to
+     * leave in permanently - these only write when something relevant
+     * has happened, not on every request.
+     */
     public function verify(IncomingRequest $request): Response
     {
         $user         = $this->getPendingUser();
         $responseJson = (string) $request->getPost('credential');
 
-        if ($responseJson === '' || ! $this->store->completeAuthentication($user, $responseJson)) {
+        if ($responseJson === '') {
+            log_message('error', 'PasskeyMfa verify: credential POST field was empty for user_id {user_id}.', ['user_id' => $user->id]);
+
             return redirect()->back()->with('error', lang('PasskeyMfa.verificationFailed'));
         }
+
+        if (! $this->store->completeAuthentication($user, $responseJson)) {
+            log_message('error', 'PasskeyMfa verify: completeAuthentication() returned false for user_id {user_id} - see PasskeyIdentityStore log entries immediately above for the specific reason.', ['user_id' => $user->id]);
+
+            return redirect()->back()->with('error', lang('PasskeyMfa.verificationFailed'));
+        }
+
+        log_message('info', 'PasskeyMfa verify: completeAuthentication() succeeded for user_id {user_id}, completing login.', ['user_id' => $user->id]);
 
         $this->completePendingAction($user);
 
