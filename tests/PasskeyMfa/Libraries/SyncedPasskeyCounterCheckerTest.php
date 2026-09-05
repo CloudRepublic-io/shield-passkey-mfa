@@ -6,8 +6,9 @@ namespace Tests\PasskeyMfa\Libraries;
 
 use CodeIgniter\Test\CIUnitTestCase;
 use PasskeyMfa\Libraries\SyncedPasskeyCounterChecker;
+use ReflectionObject;
 use RuntimeException;
-use Webauthn\PublicKeyCredentialSource;
+use Webauthn\CredentialRecord;
 
 /**
  * Tests SyncedPasskeyCounterChecker's own comparison logic in
@@ -17,20 +18,29 @@ use Webauthn\PublicKeyCredentialSource;
  * THOSE can't cover the real crypto success path) - this one genuinely
  * can be, and is, fully covered.
  *
- * Uses a PHPUnit mock for PublicKeyCredentialSource rather than
- * constructing a real one (which needs several WebAuthn-specific
- * constructor arguments irrelevant to what's under test here) - only
- * getCounter() is ever called by the class under test, so only that
- * needs stubbing.
+ * Uses a PHPUnit mock for CredentialRecord, with its own "counter"
+ * property set directly via reflection rather than through the mock's
+ * own constructor - CredentialRecord's real constructor needs several
+ * WebAuthn-specific arguments (credential ID, public key, transports,
+ * etc.) irrelevant to what's under test here, and reflection sidesteps
+ * needing to get all of those right just to test a single property
+ * comparison. This also avoids assuming the property is publicly
+ * writable (it may be declared readonly) - reflection's setAccessible()
+ * bypasses that regardless, the same pattern already established
+ * elsewhere in this series for exactly this kind of situation.
  */
 final class SyncedPasskeyCounterCheckerTest extends CIUnitTestCase
 {
-    private function credentialSourceWithCounter(int $counter): PublicKeyCredentialSource
+    private function credentialRecordWithCounter(int $counter): CredentialRecord
     {
-        $source = $this->createMock(PublicKeyCredentialSource::class);
-        $source->method('getCounter')->willReturn($counter);
+        $record = $this->createMock(CredentialRecord::class);
 
-        return $source;
+        $reflection = new ReflectionObject($record);
+        $property   = $reflection->getProperty('counter');
+        $property->setAccessible(true);
+        $property->setValue($record, $counter);
+
+        return $record;
     }
 
     /**
@@ -44,7 +54,7 @@ final class SyncedPasskeyCounterCheckerTest extends CIUnitTestCase
     {
         $checker = new SyncedPasskeyCounterChecker();
 
-        $checker->check($this->credentialSourceWithCounter(0), 0);
+        $checker->check($this->credentialRecordWithCounter(0), 0);
         $this->addToAssertionCount(1); // did not throw
     }
 
@@ -52,7 +62,7 @@ final class SyncedPasskeyCounterCheckerTest extends CIUnitTestCase
     {
         $checker = new SyncedPasskeyCounterChecker();
 
-        $checker->check($this->credentialSourceWithCounter(5), 6);
+        $checker->check($this->credentialRecordWithCounter(5), 6);
         $this->addToAssertionCount(1); // did not throw
     }
 
@@ -61,7 +71,7 @@ final class SyncedPasskeyCounterCheckerTest extends CIUnitTestCase
         $checker = new SyncedPasskeyCounterChecker();
 
         $this->expectException(RuntimeException::class);
-        $checker->check($this->credentialSourceWithCounter(5), 5);
+        $checker->check($this->credentialRecordWithCounter(5), 5);
     }
 
     public function testDecreasingCounterIsRejected(): void
@@ -69,7 +79,7 @@ final class SyncedPasskeyCounterCheckerTest extends CIUnitTestCase
         $checker = new SyncedPasskeyCounterChecker();
 
         $this->expectException(RuntimeException::class);
-        $checker->check($this->credentialSourceWithCounter(10), 3);
+        $checker->check($this->credentialRecordWithCounter(10), 3);
     }
 
     /**
@@ -85,6 +95,6 @@ final class SyncedPasskeyCounterCheckerTest extends CIUnitTestCase
         $checker = new SyncedPasskeyCounterChecker();
 
         $this->expectException(RuntimeException::class);
-        $checker->check($this->credentialSourceWithCounter(5), 0);
+        $checker->check($this->credentialRecordWithCounter(5), 0);
     }
 }

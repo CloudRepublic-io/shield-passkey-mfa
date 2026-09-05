@@ -95,6 +95,20 @@ logic in isolation (this specific piece, unlike most of this package,
 has no cryptography dependency, so it's fully testable without a real
 browser).
 
+**A follow-up fix, confirmed against a real fatal error on a real
+app:** the first version of `SyncedPasskeyCounterChecker` type-hinted
+`Webauthn\PublicKeyCredentialSource` and called `->getCounter()`,
+which caused an immediate `Fatal error: Declaration ... must be
+compatible with Webauthn\Counter\CounterChecker::check(Webauthn\CredentialRecord
+$credentialRecord, int $currentCounter): void` on any installed
+version where the interface itself expects the newer type. Confirmed
+via `web-auth/webauthn-lib`'s own official documentation:
+`PublicKeyCredentialSource` was renamed to `CredentialRecord` in
+v5.3.0 (the old name still exists, as a deprecated subclass, for
+backward compatibility - removed entirely in v6.0), and the counter is
+read as a direct property (`->counter`), not a method call. Both are
+fixed now - see that class's own doc comment for the full account.
+
 ## The two gotchas that will bite you before anything else does
 
 1. **`$rpId` must be your app's real domain, exactly.** No scheme

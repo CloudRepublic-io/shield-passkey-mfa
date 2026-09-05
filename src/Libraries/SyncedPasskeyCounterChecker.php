@@ -6,7 +6,7 @@ namespace PasskeyMfa\Libraries;
 
 use RuntimeException;
 use Webauthn\Counter\CounterChecker;
-use Webauthn\PublicKeyCredentialSource;
+use Webauthn\CredentialRecord;
 
 /**
  * Implements the W3C WebAuthn Level 2 guidance on signature counters
@@ -42,20 +42,39 @@ use Webauthn\PublicKeyCredentialSource;
  * (detecting a cloned hardware authenticator) for the credentials
  * where that check actually means something.
  *
- * VERSION SENSITIVITY, same caveat as WebauthnFactory (this class's own
- * only caller): written against
- * PublicKeyCredentialSource::getCounter() as confirmed in
- * web-auth/webauthn-lib's own v5.0 documentation
- * (webauthn-doc.spomky-labs.com/pure-php/advanced-behaviours/authenticator-counter) -
- * an earlier version's docs show a direct ->counter property access
- * instead, so if your installed version doesn't have getCounter() as a
- * method, this is the line to adjust.
+ * VERSION SENSITIVITY - CONFIRMED, REAL FIX applied here after an
+ * earlier version of this file caused a real fatal error against a
+ * real app: "Declaration ... must be compatible with
+ * Webauthn\Counter\CounterChecker::check(Webauthn\CredentialRecord
+ * $credentialRecord, int $currentCounter): void". That earlier version
+ * type-hinted Webauthn\PublicKeyCredentialSource and called
+ * ->getCounter() - confirmed WRONG on both counts against
+ * web-auth/webauthn-lib's own official current documentation
+ * (webauthn-doc.spomky-labs.com/prerequisites/credential-record):
+ *
+ *   "Renamed in v5.3.0: The class Webauthn\PublicKeyCredentialSource
+ *   has been renamed to Webauthn\CredentialRecord. The old class name
+ *   is deprecated and will be removed in version 6.0.
+ *   PublicKeyCredentialSource now extends CredentialRecord for
+ *   backward compatibility."
+ *
+ * - and that same documentation's own example reads the counter as a
+ * direct property (`$credentialRecord->counter`), not a method call.
+ * Both are fixed here: the type hint now matches the actual interface
+ * (CredentialRecord, not the now-deprecated PublicKeyCredentialSource
+ * subclass of it), and the counter is read via ->counter directly.
+ * Since PublicKeyCredentialSource extends CredentialRecord, a
+ * PublicKeyCredentialSource instance (which is what
+ * PasskeyIdentityStore::completeAuthentication() actually passes
+ * through the library's own internals) still satisfies this type hint
+ * and still exposes the same ->counter property, inherited from its
+ * parent - no other file in this package needed to change.
  */
 class SyncedPasskeyCounterChecker implements CounterChecker
 {
-    public function check(PublicKeyCredentialSource $publicKeyCredentialSource, int $currentCounter): void
+    public function check(CredentialRecord $credentialRecord, int $currentCounter): void
     {
-        $storedCounter = $publicKeyCredentialSource->getCounter();
+        $storedCounter = $credentialRecord->counter;
 
         if ($storedCounter === 0 && $currentCounter === 0) {
             return;
