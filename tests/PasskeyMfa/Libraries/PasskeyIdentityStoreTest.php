@@ -419,4 +419,77 @@ final class PasskeyIdentityStoreTest extends CIUnitTestCase
 
         $this->assertFalse($this->store->completeAuthentication($user, '{"anything":"goes"}'));
     }
+
+    // -------------------------------------------------------------------
+    // beginDiscoverableAuthentication()/completeDiscoverableAuthentication() -
+    // the usernameless counterparts used by
+    // PasskeyDiscoverableAuthController's "Login with a passkey" button.
+    // -------------------------------------------------------------------
+
+    /**
+     * THE key structural difference from
+     * testBeginAuthenticationProducesWellFormedOptionsJson() above -
+     * allowCredentials must be genuinely ABSENT here, not just empty,
+     * confirmed via web-auth/webauthn-lib's own official documentation
+     * as the correct way to request a discoverable/usernameless
+     * ceremony (see beginDiscoverableAuthentication()'s own doc
+     * comment for the citation).
+     */
+    public function testBeginDiscoverableAuthenticationProducesWellFormedOptionsJsonWithNoAllowCredentials(): void
+    {
+        $json    = $this->store->beginDiscoverableAuthentication();
+        $decoded = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+
+        $this->assertArrayHasKey('challenge', $decoded);
+        $this->assertNotEmpty($decoded['challenge']);
+
+        // See PasskeyDiscoverableAuthControllerTest's own equivalent
+        // test for why this checks "absent or empty" rather than
+        // strictly "absent" - both carry the same "unrestricted
+        // picker" meaning; only a non-empty, restricting list would be
+        // wrong here.
+        $this->assertTrue(
+            ! array_key_exists('allowCredentials', $decoded) || $decoded['allowCredentials'] === [],
+            'allowCredentials should be absent or empty for a discoverable ceremony, not a restricting list.'
+        );
+    }
+
+    public function testCompleteDiscoverableAuthenticationFailsGracefullyWithNoPendingChallenge(): void
+    {
+        $this->assertNull($this->store->completeDiscoverableAuthentication('{"anything":"goes"}'));
+    }
+
+    public function testCompleteDiscoverableAuthenticationFailsGracefullyWithGarbageResponse(): void
+    {
+        $this->store->beginDiscoverableAuthentication();
+
+        $this->assertNull($this->store->completeDiscoverableAuthentication('not even json'));
+    }
+
+    /**
+     * Confirms the "no known user at all" case is handled the same
+     * way every other malformed-input case is (returns null, doesn't
+     * throw) - this method has no User parameter to even be given a
+     * wrong one, unlike completeAuthentication(), so this is really
+     * confirming the credential_id lookup itself fails gracefully when
+     * nothing matches at all, which is the normal case for a garbage
+     * or fabricated credential id.
+     */
+    public function testCompleteDiscoverableAuthenticationReturnsNullWhenNoCredentialMatches(): void
+    {
+        $this->store->beginDiscoverableAuthentication();
+
+        $fabricatedResponse = json_encode([
+            'id'       => Base64Url::encode(random_bytes(16)),
+            'rawId'    => Base64Url::encode(random_bytes(16)),
+            'type'     => 'public-key',
+            'response' => [
+                'clientDataJSON'    => Base64Url::encode('{}'),
+                'authenticatorData' => Base64Url::encode(random_bytes(37)),
+                'signature'         => Base64Url::encode(random_bytes(64)),
+            ],
+        ]);
+
+        $this->assertNull($this->store->completeDiscoverableAuthentication($fabricatedResponse));
+    }
 }

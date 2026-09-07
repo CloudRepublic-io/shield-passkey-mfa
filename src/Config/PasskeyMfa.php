@@ -91,10 +91,16 @@ class PasskeyMfa extends BaseConfig
     public bool $enableEarlyAuthentication = false;
 
     /**
-     * Whether a successful early passkey authentication (see above)
-     * completes the login OUTRIGHT, or still requires whatever your
-     * app's own MFA would otherwise apply (e.g.
-     * shield-mfa-dispatcher).
+     * Whether a successful passkey login that bypasses Shield's normal
+     * Session::attempt() flow completes login OUTRIGHT, or still
+     * requires whatever your app's own MFA would otherwise apply (e.g.
+     * shield-mfa-dispatcher). Shared by BOTH
+     * $enableEarlyAuthentication (above) and
+     * $enableDiscoverableAuthentication (below) - the underlying
+     * question ("is a verified passkey sufficient on its own, or
+     * should MFA still apply") is the same regardless of which UI
+     * triggered the passkey ceremony, so this one setting controls
+     * both rather than needing a separate, identical toggle for each.
      *
      * Defaults to true - unlike shield-oauth-login's equivalent toggle
      * ($triggerMfaAfterSso, which defaults to STILL requiring MFA),
@@ -108,6 +114,51 @@ class PasskeyMfa extends BaseConfig
      * MFA on top regardless.
      */
     public bool $earlyAuthenticationIsSufficient = true;
+
+    // -- Optional: "Login with a passkey" button (no email needed) ----------
+
+    /**
+     * Off by default - like $enableEarlyAuthentication, a genuinely
+     * different UX/security shape from this package's main job, so
+     * it's opt-in even once PasskeyDiscoverableAuthController's routes
+     * are added, not automatic. Distinct from
+     * $enableEarlyAuthentication: that feature still needs the
+     * visitor's email up front (to look up which credentials to
+     * offer); this one needs no username or email at all - the
+     * visitor clicks a button, the browser's own passkey picker shows
+     * whichever credentials it has for your site, and the server
+     * identifies who they are from whichever one they choose. Requires
+     * "discoverable" (a.k.a. "resident key") credentials - see
+     * $residentKeyRequirement below, and "Optional: 'Login with a
+     * passkey' button (no email needed)" in the README for the full
+     * picture, including what this means for ALREADY-registered
+     * passkeys specifically.
+     */
+    public bool $enableDiscoverableAuthentication = false;
+
+    /**
+     * Controls what NEW registrations request from the authenticator -
+     * 'discouraged', 'preferred', or 'required'. Only relevant if you
+     * plan to use $enableDiscoverableAuthentication above (or might
+     * later) - has no effect on anything else this package does.
+     *
+     * web-auth/webauthn-lib's own default, when nothing is specified
+     * at all (which is what earlier versions of this package's own
+     * beginRegistration() did), is equivalent to 'preferred' - meaning
+     * already-registered passkeys MAY already be discoverable, with no
+     * guarantee either way, since it depended entirely on what the
+     * authenticator itself chose to do. 'required' guarantees future
+     * registrations are discoverable, but will cause registration
+     * itself to fail outright on any authenticator that cannot create
+     * one at all - true passkey managers (Chrome/Edge/Safari's own
+     * built-in ones) always can, but this is a real risk if this
+     * package is ever used with older, non-passkey-aware security
+     * keys. 'preferred' (the default here) asks for a discoverable
+     * credential without hard-requiring one, matching the library's
+     * own default behavior but stated explicitly rather than left
+     * implicit.
+     */
+    public string $residentKeyRequirement = 'preferred';
 
     /**
      * View paths used by this package, keyed by a logical name - the

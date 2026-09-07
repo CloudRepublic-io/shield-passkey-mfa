@@ -53,6 +53,24 @@ $routes->post(
     ['as' => 'passkey-early-auth-verify']
 );
 
+// OPTIONAL - only needed if Config\PasskeyMfa::$enableDiscoverableAuthentication
+// is turned on. Same deliberate placement under auth/a/... as the two
+// routes above, for the identical reason - see the comment above these
+// for the full explanation. Also deliberately public/unfiltered: no
+// user is known at all when options() is called, and verify() is what
+// determines who logged in, so neither can require an existing session.
+$routes->post(
+    'auth/a/passkey-discoverable/options',
+    '\PasskeyMfa\Controllers\PasskeyDiscoverableAuthController::options',
+    ['as' => 'passkey-discoverable-auth-options']
+);
+
+$routes->post(
+    'auth/a/passkey-discoverable/verify',
+    '\PasskeyMfa\Controllers\PasskeyDiscoverableAuthController::verify',
+    ['as' => 'passkey-discoverable-auth-verify']
+);
+
 // These are for an already-fully-logged-in user managing their own
 // passkeys, so the 'session' filter is correct here.
 $routes->group('', ['filter' => 'session'], static function ($routes) {

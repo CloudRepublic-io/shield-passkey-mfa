@@ -53,28 +53,47 @@ looks right" is meaningfully less reassuring than usual, given how
 cryptography-heavy the actual verification is - there's no equivalent
 here to TOTP's RFC 6238 test vectors to check the math against.
 
-## A deprecation warning fixed - not a functional break, but real
+## A deprecation warning - left in place deliberately, after a real mistake
 
-**Fixed in the current version.** If your log shows `[DEPRECATED]
-Since web-auth/webauthn-lib 5.3.0: Setting the "name" field on
-"PublicKeyCredentialRpEntity" is deprecated` during registration
+If your log shows `[DEPRECATED] Since web-auth/webauthn-lib 5.3.0:
+Setting the "name" field on "PublicKeyCredentialRpEntity" is
+deprecated` during registration
 (`PasskeySettingsController::enroll()`/`confirm()`, or
-`PasskeyActivator`), this is confirmed via the library's own official
-migration docs
+`PasskeyActivator`), this is expected and harmless on
+`web-auth/webauthn-lib` 5.3.0+ - confirmed via the library's own
+official migration docs
 (`webauthn-doc.spomky-labs.com/migration/from-v5.x-to-v6.0`): the
 Relying Party entity's `name` property was deprecated in v5.3.0 and
-will be **removed entirely** in v6.0 - "According to the WebAuthn
-Level 3 specification, the Relying Party name is no longer required."
-`PasskeyIdentityStore::beginRegistration()` now passes `null` instead
-of `Config\PasskeyMfa::$rpName` when building this entity - harmless on
-older library versions too, since the parameter was always nullable.
-**This was only ever a warning, not a functional failure** - registration
-and login both worked correctly either way - so if you were chasing a
-*different*, actually-broken symptom and found this warning in your
-log at the same time, it's very likely unrelated to whatever you were
-actually diagnosing; keep looking at the specific flow (login vs.
-registration) that's actually failing rather than assuming this
-explains it.
+will be removed entirely in v6.0, since "the Relying Party name is no
+longer required" per the WebAuthn Level 3 spec.
+
+**A real mistake happened here, and it's worth being direct about
+it.** An earlier version of this README claimed passing `null` instead
+of `Config\PasskeyMfa::$rpName` to this entity "fixed" the warning -
+but that assumed the parameter had *already* been widened to accept
+`null` at the same time it was deprecated. It hadn't: a real app
+running this package's own declared, supported constraint
+(`composer.json`: `web-auth/webauthn-lib ^5.1`) hit an immediate fatal
+`TypeError` - `Argument #1 ($name) must be of type string, null
+given` - the moment that "fix" shipped. Deprecating a feature and
+changing its type signature are two distinct events that don't
+necessarily happen together; marking something deprecated typically
+means "still works, but discouraged," not "already accepts what a
+future version will require."
+
+**This is reverted.** `beginRegistration()` passes the actual string
+value again, which is safe across this package's entire declared
+`^5.1` range regardless of which specific patch version is installed -
+a non-null string satisfies both a `string` and a `?string` parameter
+type. The deprecation warning itself is real but harmless (registration
+and login both work correctly either way, on every version in the
+supported range) - living with a harmless log warning is the correct
+trade-off here, not risking a fatal error in exchange for silencing
+it. See `PasskeyIdentityStore::beginRegistration()`'s own doc comment
+for the full account. If you were chasing a *different*,
+actually-broken symptom and found this warning in your log at the same
+time, it's unrelated - keep looking at the specific flow that's
+actually failing.
 
 ## Every synced passkey login used to fail verification - fixed
 
@@ -254,8 +273,11 @@ user - `account/passkeys` isn't limited to one).
 
 ```
 src/
-  Assets/passkey-early-auth.js           <- reference JS for the optional "trigger a passkey
-                                             prompt on email blur" feature - not auto-loaded
+  Assets/
+    passkey-early-auth.js               <- reference JS for the optional "trigger a passkey
+                                            prompt on email blur" feature - not auto-loaded
+    passkey-discoverable-auth.js        <- reference JS for the optional "Login with a passkey"
+                                            button (no email needed) - not auto-loaded
   Authentication/Actions/
     PasskeyMfa.php                       <- 'login' action: verification only
     PasskeyActivator.php                 <- 'register' action: optional setup at signup
@@ -266,6 +288,7 @@ src/
     PasskeySettingsController.php        <- self-service add/rename/remove
     PasskeyStepUpController.php          <- step-up challenge page
     PasskeyEarlyAuthController.php       <- optional login-page-blur passkey prompt endpoints
+    PasskeyDiscoverableAuthController.php <- optional "Login with a passkey" button endpoints
   Database/Migrations/..._CreateAuthPasskeyCredentials.php
   Filters/RequireFreshPasskey.php        <- step-up auth filter for sensitive routes
   Language/en/PasskeyMfa.php
@@ -276,6 +299,8 @@ src/
                                              signature counter check for synced passkeys
     PasskeyIdentityStore.php             <- shared registration/verification orchestration
     CompletesPendingAction.php           <- shared "finish this pending action" trait
+    CompletesEarlyLogin.php              <- shared login-completion trait for the two
+                                             out-of-band passkey login features above
   Models/PasskeyCredentialModel.php
   Views/
     passkey_activator_enroll.php         <- registration ceremony + skip (registration)
@@ -709,18 +734,135 @@ straight to your app's post-login destination.
 ### The reflection-based login completion, and why it's needed here too
 
 When `$earlyAuthenticationIsSufficient` is `false`,
-`PasskeyEarlyAuthController::completeLogin()` uses the identical
-reflection-based mechanism `shield-oauth-login`'s own
-`OAuthLoginController::completeLogin()` needed, for the identical
-underlying reason: Shield's own `Session::attempt()` is the only path
-that correctly triggers its **private** `setAuthAction()` pending-check
-- and `attempt()` requires a password to check, which a visitor at
-this point in the flow doesn't have (they haven't submitted the login
-form at all yet). There is no public Shield API for "log this
-already-verified user in, but still check whether MFA should apply
-first." See that method's own doc comment, and `shield-oauth-login`'s
-README, for the fuller account of why this approach was needed rather
-than a cleaner alternative.
+`CompletesEarlyLogin::completeEarlyLogin()` (a trait shared with
+`PasskeyDiscoverableAuthController` - see "Optional: 'Login with a
+passkey' button" below) uses the identical reflection-based mechanism
+`shield-oauth-login`'s own `OAuthLoginController::completeLogin()`
+needed, for the identical underlying reason: Shield's own
+`Session::attempt()` is the only path that correctly triggers its
+**private** `setAuthAction()` pending-check - and `attempt()` requires
+a password to check, which a visitor at this point in the flow doesn't
+have (they haven't submitted the login form at all yet). There is no
+public Shield API for "log this already-verified user in, but still
+check whether MFA should apply first." See that method's own doc
+comment, and `shield-oauth-login`'s README, for the fuller account of
+why this approach was needed rather than a cleaner alternative.
+
+## Optional: "Login with a passkey" button (no email needed)
+
+A second, distinct way to let a passkey skip the password form
+entirely - a genuinely different shape from "Optional: trigger a
+passkey prompt from the login form" above, not a variation of it. That
+feature still needs the visitor's email first, to look up which
+credentials to offer. This one needs nothing at all: a plain button
+that, when clicked, lets the browser's own passkey picker show
+whichever credentials it has for your site - across every account, not
+just one the server already has in mind - and the server figures out
+who logged in from whichever one gets chosen. This is the
+"discoverable" or "usernameless" WebAuthn flow, and it's what most
+sites actually mean when they show a standalone "Login with a passkey"
+button separate from the email field.
+
+Off by default, same as the email-blur feature - `Config\PasskeyMfa::$enableDiscoverableAuthentication`.
+
+### Requires discoverable ("resident key") credentials
+
+This is the one prerequisite that genuinely gates this feature, and
+it's worth understanding before turning it on. A passkey only shows up
+in the browser's own picker for a usernameless request if it was
+registered as a client-side discoverable credential (older WebAuthn
+terminology: a "resident key") in the first place - a non-discoverable
+credential can still be used when the server already knows who's
+logging in and supplies `allowCredentials` (exactly what
+`PasskeyMfa`/`PasskeyEarlyAuthController` both already do), but it
+simply won't appear in a picker shown with no `allowCredentials` at
+all.
+
+`Config\PasskeyMfa::$residentKeyRequirement` (default `'preferred'`)
+controls what **new** registrations request from the authenticator via
+`beginRegistration()`'s own `authenticatorSelection`. Confirmed via
+`web-auth/webauthn-lib`'s own official documentation
+(`webauthn-doc.spomky-labs.com/pure-php/advanced-behaviours/authentication-without-username`):
+the library's own default, when this parameter is omitted entirely
+(which is what earlier versions of this package's own
+`beginRegistration()` did, before this feature existed), is already
+equivalent to `'preferred'` - meaning **already-registered passkeys may
+already be discoverable**, with no guarantee either way, since it
+depended entirely on what the specific authenticator chose to do at
+the time. There is no way for this package to detect, after the fact,
+whether an already-stored credential is discoverable or not - if a
+user's existing passkey doesn't show up in this feature's own picker,
+the practical fix is re-registering it (`account/passkeys`), not
+something this package can resolve automatically.
+
+`'required'` guarantees future registrations are discoverable, at a
+real cost: registration itself fails outright on any authenticator that
+cannot create one at all. True passkey managers (Chrome/Edge/Safari's
+own built-in ones, which is what this whole package is built around)
+always can - but if this package is ever used alongside older,
+non-passkey-aware security keys, `'required'` would block their
+registration entirely. `'preferred'` (the default) asks for a
+discoverable credential without hard-requiring one.
+
+### How it works
+
+Two new AJAX (JSON) endpoints (`PasskeyDiscoverableAuthController`),
+architecturally close to `PasskeyEarlyAuthController`'s own two, and
+reusing the same `CompletesEarlyLogin` trait for the login-completion
+step both need:
+
+- **`POST auth/a/passkey-discoverable/options`** - no email or
+  username parameter at all. Always returns a fresh challenge when the
+  feature is enabled; there's no `available: false` case the way the
+  email-based feature has, since no candidate user exists yet to check
+  enrollment against - the browser's own picker is what determines
+  whether the visitor has anything usable.
+- **`POST auth/a/passkey-discoverable/verify`** - given the browser's
+  WebAuthn response, identifies and verifies the user in one step
+  (`PasskeyIdentityStore::completeDiscoverableAuthentication()`), then
+  logs them in exactly like the email-based feature does.
+
+### The security design behind identifying the user, worth being explicit about
+
+The assertion response's own `userHandle` field is available and is
+what many WebAuthn tutorials read directly to answer "who logged in" -
+this package deliberately does not do that. Instead,
+`completeDiscoverableAuthentication()` looks up the *credential* by its
+ID first (`PasskeyCredentialModel::findByCredentialId()` - the exact
+same trusted, server-side lookup `completeAuthentication()` already
+relies on, populated only at registration time under this app's own
+control), derives a *candidate* user from that row's own `user_id`, and
+only *afterward* runs the actual cryptographic signature check
+(`assertionValidator()->check()`) against that specific candidate. If
+that check fails, the candidate is never trusted or returned, no matter
+what the response's own `userHandle` claimed. Deriving identity from
+data this server already controls, then confirming it cryptographically,
+is a stronger design than trusting a client-supplied field ahead of any
+check at all - see `completeDiscoverableAuthentication()`'s own doc
+comment for the fuller account.
+
+### Setup
+
+1. Decide your `Config\PasskeyMfa::$residentKeyRequirement` (see above),
+   and set `$enableDiscoverableAuthentication = true`.
+2. Add the two routes from `routes-snippet.php` (already included if
+   you copied the whole snippet earlier - they return 404 on their own
+   if the config flag above is off).
+3. Add a button to your login page (e.g. `<button type="button"
+   id="passkey-discoverable-login">Login with a passkey</button>`,
+   optionally with a status element alongside it), then copy
+   `src/Assets/passkey-discoverable-auth.js` into your own login page's
+   JavaScript - a reference implementation, not something this package
+   loads automatically anywhere. Adjust the three things called out at
+   the top of that file: the button/status selectors, your app's CSRF
+   token field name, and the route paths if you changed them from the
+   defaults.
+4. Test it in a real browser with a real, discoverable passkey already
+   registered - same standing caveat as everywhere else in this
+   README: "the code looks right" is meaningfully less reassuring for
+   anything WebAuthn-shaped than for ordinary application code. If the
+   picker appears but shows nothing, that's most likely the
+   discoverability prerequisite above, not a bug in the script.
 
 ## Tests
 
@@ -752,7 +894,8 @@ tests/PasskeyMfa/
   Libraries/SyncedPasskeyCounterCheckerTest.php <- the fixed counter-check logic, in isolation -
                                                      no cryptography involved, fully covered
   Libraries/PasskeyIdentityStoreTest.php        <- marker sync, ownership, JSON shape, graceful failures,
-                                                     and the regression test for the fixed duplicate-key bug
+                                                     the regression test for the fixed duplicate-key bug,
+                                                     and beginDiscoverableAuthentication()'s own JSON shape
   Authentication/Actions/PasskeyMfaTest.php     <- login action: getType/createIdentity, show() smoke test
   Authentication/Actions/PasskeyActivatorTest.php <- register action: same, plus skip
   Controllers/PasskeySettingsControllerTest.php <- list/rename/remove only (not enroll/confirm)
@@ -761,6 +904,9 @@ tests/PasskeyMfa/
                                                     graceful verify() failure - not the crypto success path)
   Controllers/PasskeyEarlyAuthControllerTest.php <- login-page-blur endpoints: config-gating,
                                                      email-enumeration safety, graceful verify() failure
+  Controllers/PasskeyDiscoverableAuthControllerTest.php <- "Login with a passkey" button endpoints:
+                                                     config-gating, no-allowCredentials shape,
+                                                     graceful verify() failure with no matching credential
 ```
 
 ### Setup

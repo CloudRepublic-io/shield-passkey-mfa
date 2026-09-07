@@ -6,10 +6,12 @@ namespace PasskeyMfa\Libraries;
 
 use CodeIgniter\Shield\Entities\User;
 use CodeIgniter\Shield\Models\UserIdentityModel;
+use CodeIgniter\Shield\Models\UserModel;
 use Config\PasskeyMfa as PasskeyMfaConfig;
 use PasskeyMfa\Models\PasskeyCredentialModel;
 use Webauthn\AuthenticatorAssertionResponse;
 use Webauthn\AuthenticatorAttestationResponse;
+use Webauthn\AuthenticatorSelectionCriteria;
 use Webauthn\PublicKeyCredential;
 use Webauthn\PublicKeyCredentialCreationOptions;
 use Webauthn\PublicKeyCredentialDescriptor;
@@ -59,8 +61,9 @@ class PasskeyIdentityStore
     public const ID_TYPE_PASSKEY          = 'passkey';
     public const ID_TYPE_PASSKEY_ACTIVATE = 'passkey_activate';
 
-    private const SESSION_REGISTRATION_OPTIONS = 'passkey_registration_options';
-    private const SESSION_LOGIN_OPTIONS        = 'passkey_login_options';
+    private const SESSION_REGISTRATION_OPTIONS  = 'passkey_registration_options';
+    private const SESSION_LOGIN_OPTIONS         = 'passkey_login_options';
+    private const SESSION_DISCOVERABLE_OPTIONS  = 'passkey_discoverable_login_options';
 
     protected PasskeyMfaConfig $config;
     protected WebauthnFactory $webauthn;
@@ -223,10 +226,27 @@ class PasskeyIdentityStore
 
         $challenge = random_bytes(32);
 
+        // Confirmed via web-auth/webauthn-lib's own official docs
+        // (webauthn-doc.spomky-labs.com/pure-php/advanced-behaviours/authenticator-selection-criteria) -
+        // residentKey accepts the raw WebAuthn spec string values
+        // directly ('discouraged'/'preferred'/'required'), not a
+        // dedicated enum type, so Config\PasskeyMfa::$residentKeyRequirement
+        // is passed straight through rather than mapped through
+        // library-specific constants this class would otherwise need
+        // to import. See that config property's own doc comment for
+        // what this controls and why 'preferred' - the library's own
+        // default when this whole parameter is omitted, which is what
+        // earlier versions of this method did - is the default here
+        // too, just stated explicitly.
+        $authenticatorSelection = AuthenticatorSelectionCriteria::create(
+            residentKey: $this->config->residentKeyRequirement,
+        );
+
         $options = PublicKeyCredentialCreationOptions::create(
             $rpEntity,
             $userEntity,
             $challenge,
+            authenticatorSelection: $authenticatorSelection,
             excludeCredentials: $excludeCredentials,
         );
 
@@ -438,6 +458,165 @@ class PasskeyIdentityStore
         session()->remove(self::SESSION_LOGIN_OPTIONS);
 
         return true;
+    }
+
+    /**
+     * Starts a "login with a passkey" ceremony with NO known user at
+     * all - the discoverable/usernameless counterpart to
+     * beginAuthentication() above. Deliberately omits allowCredentials
+     * entirely rather than passing an empty array - confirmed via
+     * web-auth/webauthn-lib's own official documentation
+     * (webauthn-doc.spomky-labs.com/pure-php/advanced-behaviours/authentication-without-username)
+     * as the correct way to request this; the browser's own passkey
+     * picker shows whichever credentials it has for this site's rpId,
+     * across every account, not just one the server already has in
+     * mind.
+     *
+     * Requires the credential being used to have been registered as
+     * discoverable ("resident key") in the first place - see
+     * Config\PasskeyMfa::$residentKeyRequirement's own doc comment for
+     * what this package requests at registration time, and its
+     * important caveat about credentials registered before that
+     * setting existed.
+     */
+    public function beginDiscoverableAuthentication(): string
+    {
+        $challenge = random_bytes(32);
+
+        $options = PublicKeyCredentialRequestOptions::create(
+            $challenge,
+            rpId: $this->config->rpId,
+        );
+
+        $json = $this->webauthn->serializer()->serialize($options, 'json');
+        session()->set(self::SESSION_DISCOVERABLE_OPTIONS, $json);
+
+        return $json;
+    }
+
+    /**
+     * Verifies a discoverable/usernameless login response and, on
+     * success, returns WHICHEVER user it turned out to be - unlike
+     * completeAuthentication() above, the caller doesn't know this in
+     * advance, since that's the entire point of this method existing
+     * separately.
+     *
+     * SECURITY DESIGN, worth being explicit about: the user is derived
+     * from the SAME trusted, server-side credential_id -> user_id
+     * lookup completeAuthentication() already relies on
+     * (PasskeyCredentialModel::findByCredentialId(), populated only at
+     * registration time under this app's own control) - NOT from the
+     * assertion response's own userHandle field, even though that
+     * field is available and is what many WebAuthn tutorials read
+     * directly for exactly this purpose. Trusting a client-supplied
+     * field to determine identity, ahead of any cryptographic check,
+     * is a weaker design than deriving the same answer from data this
+     * server already controls and only afterward confirming the
+     * cryptographic signature actually matches that specific stored
+     * credential - assertionValidator()->check() below is what
+     * actually proves the visitor holds the matching private key; the
+     * lookup above is only ever a CANDIDATE identity until that check
+     * passes. If it fails, this returns null - the candidate user is
+     * never trusted or returned regardless of how the lookup went.
+     *
+     * Returns null (never throws) on any failure, mirroring
+     * completeAuthentication()'s own "never throw" contract - see that
+     * method's own doc comment, and completeRegistration()'s, for why.
+     */
+    public function completeDiscoverableAuthentication(string $responseJson): ?User
+    {
+        $this->lastFailureReason = null;
+
+        $optionsJson = session(self::SESSION_DISCOVERABLE_OPTIONS);
+
+        if ($optionsJson === null) {
+            $this->lastFailureReason = 'no pending discoverable options in session';
+            log_message('error', 'PasskeyMfa completeDiscoverableAuthentication: no pending options in session.');
+
+            return null;
+        }
+
+        try {
+            /** @var PublicKeyCredentialRequestOptions $options */
+            $options = $this->webauthn->serializer()->deserialize(
+                $optionsJson,
+                PublicKeyCredentialRequestOptions::class,
+                'json'
+            );
+
+            /** @var PublicKeyCredential $publicKeyCredential */
+            $publicKeyCredential = $this->webauthn->serializer()->deserialize(
+                $responseJson,
+                PublicKeyCredential::class,
+                'json'
+            );
+
+            if (! $publicKeyCredential->response instanceof AuthenticatorAssertionResponse) {
+                $this->lastFailureReason = 'deserialized response was not an AuthenticatorAssertionResponse';
+                log_message('error', 'PasskeyMfa completeDiscoverableAuthentication: deserialized response was not an AuthenticatorAssertionResponse.');
+
+                return null;
+            }
+
+            $credentialIdB64 = Base64Url::encode($publicKeyCredential->rawId);
+            $row             = $this->credentials()->findByCredentialId($credentialIdB64);
+
+            if ($row === null) {
+                $this->lastFailureReason = "no stored credential row found for credential_id {$credentialIdB64}";
+                log_message('error', 'PasskeyMfa completeDiscoverableAuthentication: no stored credential row found for credential_id {credential_id}.', ['credential_id' => $credentialIdB64]);
+
+                return null;
+            }
+
+            // The CANDIDATE user, from this server's own trusted data -
+            // not yet proven to be who actually made this request. See
+            // this method's own doc comment for why this ordering (and
+            // not reading userHandle directly) is the safer design.
+            $candidateUser = model(UserModel::class)->find((int) $row['user_id']);
+
+            if ($candidateUser === null) {
+                $this->lastFailureReason = "credential_id {$credentialIdB64} references a user_id ({$row['user_id']}) that no longer exists";
+                log_message('error', 'PasskeyMfa completeDiscoverableAuthentication: credential_id {credential_id} references a user_id that no longer exists.', ['credential_id' => $credentialIdB64]);
+
+                return null;
+            }
+
+            /** @var PublicKeyCredentialSource $storedSource */
+            $storedSource = $this->webauthn->serializer()->deserialize(
+                $row['public_key_credential_source'],
+                PublicKeyCredentialSource::class,
+                'json'
+            );
+
+            // Identical validation call to completeAuthentication()'s
+            // own - same NOTE about check()'s own version sensitivity
+            // applies here too. The only difference is that
+            // (string) $candidateUser->id was DERIVED above, rather
+            // than being an input the caller already knew.
+            $updatedSource = $this->webauthn->assertionValidator()->check(
+                $storedSource,
+                $publicKeyCredential->response,
+                $options,
+                $this->config->rpId,
+                (string) $candidateUser->id,
+            );
+        } catch (\Throwable $e) {
+            $this->lastFailureReason = get_class($e) . ': ' . $e->getMessage();
+            log_message('error', 'PasskeyMfa completeDiscoverableAuthentication: {exception}', ['exception' => $e]);
+
+            return null;
+        }
+
+        $this->credentials()->update($row['id'], [
+            'public_key_credential_source' => $this->webauthn->serializer()->serialize($updatedSource, 'json'),
+            'last_used_at'                 => date('Y-m-d H:i:s'),
+        ]);
+
+        session()->remove(self::SESSION_DISCOVERABLE_OPTIONS);
+
+        // Only NOW, after the cryptographic check above has actually
+        // succeeded, is the candidate user trusted and returned.
+        return $candidateUser;
     }
 
     public function cancelAuthentication(): void
