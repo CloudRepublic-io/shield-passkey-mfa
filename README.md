@@ -53,6 +53,29 @@ looks right" is meaningfully less reassuring than usual, given how
 cryptography-heavy the actual verification is - there's no equivalent
 here to TOTP's RFC 6238 test vectors to check the math against.
 
+## A deprecation warning fixed - not a functional break, but real
+
+**Fixed in the current version.** If your log shows `[DEPRECATED]
+Since web-auth/webauthn-lib 5.3.0: Setting the "name" field on
+"PublicKeyCredentialRpEntity" is deprecated` during registration
+(`PasskeySettingsController::enroll()`/`confirm()`, or
+`PasskeyActivator`), this is confirmed via the library's own official
+migration docs
+(`webauthn-doc.spomky-labs.com/migration/from-v5.x-to-v6.0`): the
+Relying Party entity's `name` property was deprecated in v5.3.0 and
+will be **removed entirely** in v6.0 - "According to the WebAuthn
+Level 3 specification, the Relying Party name is no longer required."
+`PasskeyIdentityStore::beginRegistration()` now passes `null` instead
+of `Config\PasskeyMfa::$rpName` when building this entity - harmless on
+older library versions too, since the parameter was always nullable.
+**This was only ever a warning, not a functional failure** - registration
+and login both worked correctly either way - so if you were chasing a
+*different*, actually-broken symptom and found this warning in your
+log at the same time, it's very likely unrelated to whatever you were
+actually diagnosing; keep looking at the specific flow (login vs.
+registration) that's actually failing rather than assuming this
+explains it.
+
 ## Every synced passkey login used to fail verification - fixed
 
 **Fixed in the current version - update immediately if you're on an
@@ -109,15 +132,53 @@ backward compatibility - removed entirely in v6.0), and the counter is
 read as a direct property (`->counter`), not a method call. Both are
 fixed now - see that class's own doc comment for the full account.
 
-**Still an open issue, not yet resolved:** a real user reports login
-still failing specifically once more than one passkey is registered,
-even with the fix above in place - the browser's own prompt completes
-successfully, but the app never logs them in. `PasskeyIdentityStore::completeAuthentication()`
-now logs the specific reason for every failure path (it silently
-returned `false` on any failure before, with zero visibility into
-why) rather than a confirmed fix for this specific report - if you hit
-this, check your PHP error log after reproducing it and compare
-against what's logged there.
+**Resolved - the real cause turned out to be unrelated to multiple
+passkeys, or to `PasskeyIdentityStore`/`PasskeyMfa` at all.** A real
+user's diagnostic session traced this to
+`Config\PasskeyMfa::$enableEarlyAuthentication` (the optional
+login-page-blur feature - see "Optional: trigger a passkey prompt from
+the login form" below) being enabled at the same time. `verify()`
+itself was confirmed working correctly via `log_message()` output in
+one test - but a later test on the same setup showed nothing logged at
+all, which turned out to mean something else entirely was intercepting
+the request before it ever reached this package's own PHP code.
+
+**The actual bug, confirmed against CodeIgniter's own documentation:**
+CI4's CSRF protection regenerates the token after every single request
+by default (`Config\Security::$regenerate`). `PasskeyEarlyAuthController::options()`
+- fired the moment a visitor blurs the email field, before they've done
+anything else - is itself a POST request, so by the time its response
+comes back, the token has already changed. The later `verify()` call
+(and, separately, the page's own normal password-login form, if a
+visitor has no passkey and falls back to typing their password) would
+then submit with a now-stale token and get silently rejected by CI4's
+own CSRF filter before ever reaching a controller. A CSRF rejection
+returns an HTML error page, not JSON - calling `.json()` on that throws,
+which this feature's own deliberately-silent error handling swallows
+completely (by design, so a genuine WebAuthn failure never blocks the
+form) - meaning this failed with **zero visibility anywhere**: no
+server-side log (the request never reached PHP code that could log
+anything) and no visible client-side error either.
+
+Both `PasskeyEarlyAuthController::options()` and `::verify()` now
+return the current token (`csrf_token()`/`csrf_hash()` - CI4's own
+"always available" functions for exactly this) in their JSON response;
+`passkey-early-auth.js` updates both its own tracked copy and the
+page's actual hidden CSRF field after every response, so its next call
+- and any fallback to the normal password form - always submits with a
+valid, current token. See `PasskeyEarlyAuthController::options()`'s own
+doc comment, and the "CSRF TOKEN HANDLING" section of
+`passkey-early-auth.js`'s own header comment, for the full account.
+
+**If you're not using early authentication at all**, this specific bug
+never applied to you, and the original "login failing with multiple
+passkeys" report was most likely this same issue coincidentally
+surfacing on whichever specific setup was being tested at the time,
+not something tied to credential count. The diagnostic logging added
+while chasing this (`log_message()` calls, and
+`PasskeyIdentityStore::$lastFailureReason`) is left in place - it's
+genuinely useful defensive instrumentation regardless of this specific
+resolved bug, not something that needs reverting.
 
 ## The two gotchas that will bite you before anything else does
 
@@ -500,6 +561,48 @@ uses). See `shield-totp-mfa`'s README for the fuller explanation of why
 step-up auth is deliberately kept out of the Action system entirely.
 
 ## Optional: trigger a passkey prompt from the login form
+
+**If you enabled this feature and hit login failures with no visible
+error and nothing in your logs, see "Every synced passkey login used
+to fail verification - fixed" further up for a confirmed CSRF
+token-regeneration bug specific to this feature, now fixed.**
+
+**If it works with one registered passkey but a real, browser-native
+"there was a problem signing you in with your passkey" error appears
+in Edge (or similar) the moment a second passkey is registered:**
+`PasskeyEarlyAuthController::options()` used to `json_decode()` the
+options and let a separate `setJSON()` call re-encode them - the login-time
+MFA challenge view (`passkey_mfa_verify.php`), using the exact same
+`PasskeyIdentityStore::beginAuthentication()`, embeds the raw JSON
+string directly instead and was already confirmed working correctly
+with multiple credentials. That decode/re-encode round trip is now
+removed - `options()` embeds the raw string the same way, matching the
+already-proven-correct pattern. **Being honest about this one:** the
+exact mechanism by which the round trip altered the data for a
+multi-entry `allowCredentials` list specifically was not isolated -
+this is a confirmed-working fix that matches known-correct behavior
+elsewhere in this package, not a fully root-caused explanation of why
+the round trip broke things. See `PasskeyEarlyAuthController::options()`'s
+own doc comment for the full account.
+
+**If the ceremony completes successfully in Edge specifically (the
+visitor sees the browser's own success indication) but nothing happens
+afterward - no error visible anywhere, and `verify()` never gets
+called (confirm via your browser's own Network tab: only the
+`options` request fires):** `passkey-early-auth.js` used to also abort
+an in-flight ceremony on the password field's own `focus` event, not
+just `input` - suspected (not fully confirmed) to have been triggered
+by Edge's own dialog/focus-management behavior around the native
+passkey prompt, causing `navigator.credentials.get()` to reject with
+an `AbortError` immediately after the visitor completed it
+successfully. `focus` is removed - only `input` (the visitor actually
+typing) and the form's own `submit` event still cancel an in-flight
+ceremony. The script's own diagnostic `console.warn()` call is also no
+longer commented out by default, so if this specific fix turns out to
+be incomplete, the real error name will be visible in the browser's own
+DevTools console on the next report, rather than needing another round
+of silent failures to narrow down. See "CANCELLING" in that file's own
+header comment for the full account.
 
 Off by default. Several sites (GitHub, Microsoft, and others) trigger
 the browser's native passkey prompt as soon as a returning user tabs

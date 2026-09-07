@@ -59,22 +59,42 @@
  * in-flight passkey ceremony (via navigator.credentials.get()'s own
  * "signal" option - the same AbortController-based mechanism MDN's own
  * docs and libraries like SimpleWebAuthn use for exactly this) the
- * moment the visitor focuses or types into the password field, or
- * submits the form - they are never required to manually dismiss the
- * browser's own dialog. Two distinct problems were involved, both fixed
- * here: (1) an earlier version's re-trigger guard (a plain "in
- * progress" flag) only prevented a SECOND ceremony while the first was
- * still running - it did nothing to stop the SAME email value from
- * triggering ANOTHER prompt on a later, separate blur event (e.g. the
- * visitor clicking back into the email field while trying to dismiss
- * the first prompt, then tabbing out again) - now tracked per-value
- * instead, so the identical email never re-prompts twice; (2) starting
- * a second navigator.credentials.get() call while a first one is still
- * pending is a well-documented source of "operation already in
- * progress" errors and overlapping/duplicate browser dialogs in some
- * browsers - aborting the first ceremony before it would ever be
- * allowed to overlap with anything prevents this outright, rather than
- * only preventing it from occurring in the first place.
+ * moment the visitor types into the password field, or submits the
+ * form - they are never required to manually dismiss the browser's own
+ * dialog. Two distinct problems were involved, both fixed here: (1) an
+ * earlier version's re-trigger guard (a plain "in progress" flag) only
+ * prevented a SECOND ceremony while the first was still running - it
+ * did nothing to stop the SAME email value from triggering ANOTHER
+ * prompt on a later, separate blur event (e.g. the visitor clicking
+ * back into the email field while trying to dismiss the first prompt,
+ * then tabbing out again) - now tracked per-value instead, so the
+ * identical email never re-prompts twice; (2) starting a second
+ * navigator.credentials.get() call while a first one is still pending
+ * is a well-documented source of "operation already in progress"
+ * errors and overlapping/duplicate browser dialogs in some browsers -
+ * aborting the first ceremony before it would ever be allowed to
+ * overlap with anything prevents this outright, rather than only
+ * preventing it from occurring in the first place.
+ *
+ * SUSPECTED, NOT FULLY CONFIRMED - EDGE-SPECIFIC ABORT ISSUE: an
+ * earlier version ALSO aborted on the password field's own 'focus'
+ * event (not just 'input'). A real report showed the ceremony
+ * completing successfully in Edge specifically (the visitor sees the
+ * browser's own success indication), but the later verify() call never
+ * firing, with nothing visible in the console. That earlier version
+ * also had its own diagnostic console.debug() call commented out by
+ * default, so any error being silently caught was never actually
+ * visible either. 'focus' is now removed (only 'input' and the form's
+ * own 'submit' event still abort an in-flight ceremony), on the theory
+ * that Edge's own dialog/focus-management lifecycle briefly moved
+ * focus to the password field at some point during or right after the
+ * ceremony, and 'focus' was the more likely of the two listeners to
+ * fire from browser-internal behavior rather than a genuine, deliberate
+ * user action. console.warn() is also no longer commented out - client-
+ * side only, never sent anywhere, so there's no downside to always
+ * having it active, and it will show the real error name (e.g.
+ * "AbortError") directly if this specific fix turns out to be
+ * incomplete.
  *
  * ADJUST THESE FOUR THINGS to match your actual login page:
  *   - EMAIL_FIELD_SELECTOR: whatever selects your email/username input.
@@ -151,12 +171,30 @@
         attemptEarlyAuthentication(email);
     });
 
-    // The moment the visitor moves on to the password field, or
-    // submits the form some other way, any in-flight ceremony is
+    // The moment the visitor actually types into the password field,
+    // or submits the form some other way, any in-flight ceremony is
     // aborted immediately - see this file's own header comment for
     // why this is the actual fix, not just the re-trigger guard above.
+    //
+    // SUSPECTED, NOT YET CONFIRMED, EDGE-SPECIFIC ISSUE: this used to
+    // also abort on the password field's own 'focus' event. A real
+    // report showed the ceremony completing successfully in Edge (the
+    // visitor sees the browser's own success indication) but verify()
+    // never being called afterward, with no error visible anywhere -
+    // consistent with something aborting the in-flight
+    // navigator.credentials.get() call between it succeeding and this
+    // script's own next line running, which would reject the promise
+    // with an AbortError that the catch block below swallows silently.
+    // 'focus' was the more likely of the two listeners to fire from
+    // browser-internal dialog/focus management, rather than a genuine,
+    // deliberate user action - 'input' requires the visitor to actually
+    // type something, a much less ambiguous signal. Removed here as
+    // the most likely fix; if this turns out not to be the actual
+    // cause, the uncommented console.error below (also new - the
+    // previous version commented this out by default, which is
+    // exactly what made this failure invisible in the first place)
+    // will show the real error on the next report instead.
     if (passwordField) {
-        passwordField.addEventListener('focus', abortActiveCeremony);
         passwordField.addEventListener('input', abortActiveCeremony);
     }
 
@@ -232,12 +270,22 @@
         } catch (error) {
             activeAbortController = null;
             // Includes the user cancelling the browser's own passkey
-            // prompt, this script itself aborting the ceremony via
-            // abortActiveCeremony(), or any other WebAuthn error - all
-            // deliberately silent, since the visitor always still has
-            // their password to fall back on. If you want visibility
-            // into genuine failures during development, uncomment:
-            // console.debug('Early passkey authentication skipped:', error);
+            // prompt (error.name === 'NotAllowedError', typically), this
+            // script itself aborting the ceremony via
+            // abortActiveCeremony() (error.name === 'AbortError'), or
+            // any other WebAuthn error. Deliberately does NOT block or
+            // visibly interrupt the form either way - the visitor
+            // always still has their password to fall back on - but
+            // DOES log to the console now, rather than silently
+            // swallowing everything: an earlier version commented this
+            // line out by default, which is exactly what made a real,
+            // confirmed bug (this file's own AbortController firing
+            // unexpectedly in Edge - see the 'focus' listener removed
+            // above) invisible to diagnose. This is client-side only
+            // (visible in the browser's own DevTools, not to the
+            // visitor, and not sent anywhere), so there's no downside
+            // to leaving it active.
+            console.warn('Early passkey authentication skipped (' + (error && error.name ? error.name : 'unknown error') + '):', error);
         }
     }
 

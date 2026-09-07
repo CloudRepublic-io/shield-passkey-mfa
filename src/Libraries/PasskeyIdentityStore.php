@@ -179,7 +179,21 @@ class PasskeyIdentityStore
      */
     public function beginRegistration(User $user, string $accountName): string
     {
-        $rpEntity   = PublicKeyCredentialRpEntity::create($this->config->rpName, $this->config->rpId);
+        // CONFIRMED, REAL DEPRECATION FIXED HERE: web-auth/webauthn-lib's
+        // own official migration docs
+        // (webauthn-doc.spomky-labs.com/migration/from-v5.x-to-v6.0)
+        // confirm PublicKeyCredentialRpEntity's own "name" property was
+        // deprecated in v5.3.0 and will be REMOVED entirely in v6.0 -
+        // "According to the WebAuthn Level 3 specification, the Relying
+        // Party name is no longer required." Passing null here avoids
+        // the deprecation notice on any v5.3.0+ install; harmless on
+        // earlier versions too, since the parameter was always nullable.
+        // Config\PasskeyMfa::$rpName itself is left in place rather than
+        // removed - still a reasonable thing for a host app to
+        // configure/document even though this library no longer reads
+        // it, and removing the config property entirely would be a
+        // needless breaking change for anyone who's already set it.
+        $rpEntity   = PublicKeyCredentialRpEntity::create(null, $this->config->rpId);
         $userHandle = (string) $user->id;
         $userEntity = PublicKeyCredentialUserEntity::create($accountName, $userHandle, $accountName);
 
