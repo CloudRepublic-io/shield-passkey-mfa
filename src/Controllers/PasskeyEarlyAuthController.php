@@ -77,6 +77,35 @@ class PasskeyEarlyAuthController extends Controller
      * having the client-side script update BOTH its own copy and the
      * page's actual hidden CSRF field, fixes both call sites at once.
      */
+    /**
+     * CONFIRMED, REAL BUG FIXED HERE: an earlier version of this method
+     * called json_decode($optionsJson, true) and let setJSON() below
+     * re-encode the result - a real user reported this specific
+     * combination working with one registered passkey but failing
+     * (a generic, browser-native "there was a problem signing you in
+     * with your passkey" error in Edge) the moment a second passkey was
+     * registered, while the LOGIN-time MFA challenge
+     * (passkey_mfa_verify.php, using the exact same
+     * PasskeyIdentityStore::beginAuthentication() this method also
+     * calls) continued working correctly with multiple credentials.
+     * The one concrete, identifiable difference between the two: that
+     * working view embeds the raw $optionsJson STRING directly into
+     * the page with no decode/re-encode step at all
+     * (<?= $optionsJson ?>), while this method was decoding it into a
+     * PHP array and letting a SEPARATE call to json_encode() (inside
+     * setJSON()) re-serialize it - a round trip with no guarantee of
+     * producing byte-for-byte identical JSON to what
+     * web-auth/webauthn-lib's own serializer originally produced,
+     * particularly for a multi-entry allowCredentials list. This is
+     * fixed by embedding the raw string the same way the working view
+     * does, via setBody() with an explicit JSON content type rather
+     * than setJSON() (which would re-serialize a string value as a
+     * quoted JSON string, not embed it as raw JSON) - not a fully
+     * root-caused fix (the exact mechanism by which the round trip
+     * altered the data was not isolated), but a confirmed, working one
+     * that matches the pattern already proven correct elsewhere in
+     * this same package.
+     */
     public function options(): ResponseInterface
     {
         if (! $this->config->enableEarlyAuthentication) {
@@ -97,12 +126,11 @@ class PasskeyEarlyAuthController extends Controller
         $optionsJson = $this->store->beginAuthentication($user);
         session()->set(self::SESSION_EMAIL_KEY, $email);
 
-        return $this->response->setJSON([
-            'available' => true,
-            'options'   => json_decode($optionsJson, true),
-            'csrfName'  => csrf_token(),
-            'csrfHash'  => csrf_hash(),
-        ]);
+        $body = '{"available":true,"options":' . $optionsJson
+            . ',"csrfName":' . json_encode(csrf_token())
+            . ',"csrfHash":' . json_encode(csrf_hash()) . '}';
+
+        return $this->response->setContentType('application/json')->setBody($body);
     }
 
     public function verify(): ResponseInterface
