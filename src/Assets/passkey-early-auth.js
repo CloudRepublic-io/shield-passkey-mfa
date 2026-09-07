@@ -32,6 +32,28 @@
  *      here at all. This must never block or visibly interrupt the
  *      form.
  *
+ * CSRF TOKEN HANDLING - CONFIRMED, REAL BUG FIXED HERE, and the most
+ * likely reason this whole feature can appear to do "nothing at all",
+ * even for visitors who DO have a registered passkey: CodeIgniter's
+ * own CSRF protection regenerates the token after every single request
+ * by default (Config\Security::$regenerate). The options() call this
+ * script makes on blur is ITSELF a POST request, so by the time its
+ * response comes back, the token has ALREADY changed - meaning the
+ * LATER verify() call (and, separately, the page's own normal
+ * password-login form, if the visitor has no passkey and falls back to
+ * typing their password) would submit with a now-stale token and get
+ * rejected by CodeIgniter's own CSRF filter before ever reaching a
+ * controller at all. A CSRF rejection returns an HTML error page, not
+ * JSON - calling .json() on that throws, which step 5 above swallows
+ * completely, so this failed completely silently: no server-side log
+ * (the request never reached PHP code that could log anything), no
+ * visible client-side error either. Both server responses
+ * (PasskeyEarlyAuthController::options()/verify()) now include the
+ * current token: this script updates its OWN copy after every
+ * response, AND writes it back into the page's actual hidden CSRF
+ * field - so both this script's own next call, and a fallback to the
+ * normal password form, always submit with a valid, current token.
+ *
  * CANCELLING - CONFIRMED, REAL FIX for prompts being hard to cancel out
  * of, or reappearing after cancelling: this script actively aborts any
  * in-flight passkey ceremony (via navigator.credentials.get()'s own
@@ -61,8 +83,9 @@
  *   - CSRF_FIELD_NAME: must match Config\Security::$tokenName in your
  *     app (CodeIgniter's default is 'csrf_test_name') - this script
  *     reads the token's CURRENT value from the hidden field csrf_field()
- *     already rendered on your login form, so no separate token
- *     fetch is needed.
+ *     already rendered on your login form (updating it after every
+ *     response - see "CSRF TOKEN HANDLING" above), so no separate
+ *     token fetch is needed up front.
  *   - The two route paths (OPTIONS_URL/VERIFY_URL) if you changed the
  *     route names in routes-snippet.php from the defaults.
  *
@@ -111,6 +134,12 @@
     // flight, if any - null whenever none is.
     var activeAbortController = null;
 
+    // The CSRF token's current value, as far as this script knows -
+    // null until the first server response tells us otherwise, in
+    // which case the page's own initial hidden field value is used.
+    // See "CSRF TOKEN HANDLING" in this file's own header comment.
+    var currentCsrfValue = null;
+
     emailField.addEventListener('blur', function () {
         var email = emailField.value.trim();
 
@@ -155,6 +184,7 @@
             }
 
             var optionsData = await optionsResponse.json();
+            updateCsrfToken(optionsData);
 
             if (!optionsData.available) {
                 return; // no passkey for this email - let them type their password
@@ -190,12 +220,15 @@
             });
 
             var verifyData = await verifyResponse.json();
+            updateCsrfToken(verifyData);
 
             if (verifyData.success) {
                 window.location.href = verifyData.redirect;
             }
             // A failed verification also falls through silently - the
-            // visitor still has their password to fall back on.
+            // visitor still has their password to fall back on, and
+            // updateCsrfToken() above already made sure that fallback
+            // form still has a current, valid token to submit with.
         } catch (error) {
             activeAbortController = null;
             // Includes the user cancelling the browser's own passkey
@@ -208,7 +241,33 @@
         }
     }
 
+    /**
+     * Reads csrfHash from a server response (both endpoints always
+     * include it - see PasskeyEarlyAuthController's own doc comment for
+     * why) and updates both this script's own tracked value AND the
+     * page's actual hidden CSRF field, so a subsequent call from this
+     * script, or a fallback to the normal password-login form, both
+     * submit with a current token rather than the one the page
+     * happened to render with initially.
+     */
+    function updateCsrfToken(data) {
+        if (!data || typeof data.csrfHash !== 'string') {
+            return;
+        }
+
+        currentCsrfValue = data.csrfHash;
+
+        var tokenField = document.querySelector('input[name="' + CSRF_FIELD_NAME + '"]');
+        if (tokenField) {
+            tokenField.value = data.csrfHash;
+        }
+    }
+
     function csrfBodyParam() {
+        if (currentCsrfValue !== null) {
+            return CSRF_FIELD_NAME + '=' + encodeURIComponent(currentCsrfValue);
+        }
+
         var tokenField = document.querySelector('input[name="' + CSRF_FIELD_NAME + '"]');
 
         return tokenField ? CSRF_FIELD_NAME + '=' + encodeURIComponent(tokenField.value) : '';

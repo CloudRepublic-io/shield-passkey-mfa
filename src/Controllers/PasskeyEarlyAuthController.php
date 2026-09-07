@@ -59,6 +59,24 @@ class PasskeyEarlyAuthController extends Controller
         $this->store  = new PasskeyIdentityStore();
     }
 
+    /**
+     * CONFIRMED, REAL BUG FIXED HERE: CI4's own CSRF protection
+     * regenerates the token after every request by default
+     * (Config\Security::$regenerate). This request is itself a POST,
+     * so by the time this method runs, the token has ALREADY changed -
+     * meaning both this feature's own later verify() call, AND the
+     * page's separate, normal password-login form (if the visitor has
+     * no passkey and falls back to it), would submit with a now-STALE
+     * token and be rejected by CI4's own CSRF filter before ever
+     * reaching a controller at all. From the outside this looked
+     * exactly like "nothing happens, silently" - no server-side log
+     * (the request never reached this class), no visible client-side
+     * error (a CSRF rejection returns HTML, not JSON, and this
+     * feature's own JS deliberately swallows any parse failure so it
+     * never blocks the form). Returning the current token here, and
+     * having the client-side script update BOTH its own copy and the
+     * page's actual hidden CSRF field, fixes both call sites at once.
+     */
     public function options(): ResponseInterface
     {
         if (! $this->config->enableEarlyAuthentication) {
@@ -69,7 +87,11 @@ class PasskeyEarlyAuthController extends Controller
         $user  = $email === '' ? null : $this->findUserByEmail($email);
 
         if ($user === null || ! $this->store->hasEnrolled($user)) {
-            return $this->response->setJSON(['available' => false]);
+            return $this->response->setJSON([
+                'available' => false,
+                'csrfName'  => csrf_token(),
+                'csrfHash'  => csrf_hash(),
+            ]);
         }
 
         $optionsJson = $this->store->beginAuthentication($user);
@@ -78,6 +100,8 @@ class PasskeyEarlyAuthController extends Controller
         return $this->response->setJSON([
             'available' => true,
             'options'   => json_decode($optionsJson, true),
+            'csrfName'  => csrf_token(),
+            'csrfHash'  => csrf_hash(),
         ]);
     }
 
@@ -94,7 +118,11 @@ class PasskeyEarlyAuthController extends Controller
         $responseJson = (string) $this->request->getPost('credential');
 
         if ($user === null || $responseJson === '' || ! $this->store->completeAuthentication($user, $responseJson)) {
-            return $this->response->setJSON(['success' => false])->setStatusCode(401);
+            return $this->response->setJSON([
+                'success'  => false,
+                'csrfName' => csrf_token(),
+                'csrfHash' => csrf_hash(),
+            ])->setStatusCode(401);
         }
 
         $mfaTriggered = $this->completeLogin($user);
