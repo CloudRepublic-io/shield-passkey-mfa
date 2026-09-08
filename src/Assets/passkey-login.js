@@ -51,6 +51,28 @@
  * one of the two features, this coordination is inert and has no
  * effect either way.
  *
+ * A LEFTOVER PROMPT CAN APPEAR ON THE NEXT PAGE - CONFIRMED, REAL BUG
+ * FIXED HERE: a real report showed the browser's native passkey prompt
+ * appearing on the 2FA challenge page - after a normal email+password
+ * login had already been submitted and navigated away from the login
+ * page entirely (most likely to happen when both fields arrive via
+ * autofill and the visitor clicks "login" immediately, without ever
+ * tabbing through the fields manually - the trigger for either feature
+ * below). If the normal login form gets submitted WHILE either
+ * feature's own options() fetch is still in flight, that feature's own
+ * AbortController does not exist yet - aborting has nothing to call
+ * .abort() on, so it silently does nothing - and the still-running
+ * async function goes on to call navigator.credentials.get() AFTER the
+ * browser has already begun navigating to the next page. Since the
+ * browser's own native dialog is chrome-level UI, not part of the
+ * page's own DOM, it can still render even once the new page has
+ * loaded - appearing as a confusing, unexpected extra prompt there.
+ * Fixed via a shared `formSubmitted` flag, checked independently of
+ * whether either feature's own AbortController happens to exist yet at
+ * every point a native prompt could otherwise be triggered - see that
+ * variable's own declaration (shared state, top of this file) for the
+ * full detail.
+ *
  * A STUCK BROWSER CEREMONY CAN BLOCK EVERY PASSKEY OPERATION ON THE
  * DEVICE - CONFIRMED, REAL BROWSER BEHAVIOR BOTH FEATURES NOW WORK
  * AROUND: a real report showed that choosing a passkey identity in the
@@ -133,6 +155,29 @@
     // "WHY THESE TWO WERE COMBINED INTO ONE FILE" above for what this
     // prevents.
     var ceremonyInProgress = false;
+
+    // CONFIRMED, REAL BUG FIXED HERE: a real report showed the
+    // browser's native passkey prompt appearing on the 2FA challenge
+    // page - AFTER a normal email+password login had already been
+    // submitted and navigated away from this page entirely. Root
+    // cause: if the normal login form is submitted (e.g. the visitor
+    // clicks "login" immediately after their email and password arrive
+    // via autofill, without ever tabbing through fields manually)
+    // WHILE either feature's own options() fetch is still in flight,
+    // that feature's own AbortController does not exist yet -
+    // aborting has nothing to call .abort() on, so it silently does
+    // nothing. The still-running async function then goes on to call
+    // navigator.credentials.get() AFTER the browser has already begun
+    // navigating to the next page - and since the browser's own
+    // native dialog is chrome-level UI, not part of the page's own
+    // DOM, it can still render even once the new page has loaded,
+    // appearing as a confusing, unexpected extra prompt there. Shared
+    // across both features (rather than local to just the email-blur
+    // one) since either could, in principle, still be running when the
+    // normal login form gets submitted - checked independently of
+    // whether either feature's own AbortController happens to exist
+    // yet, closing this gap regardless of timing.
+    var formSubmitted = false;
 
     /**
      * Reads csrfHash from a server response (every endpoint from
@@ -267,7 +312,7 @@
         emailField.addEventListener('blur', function () {
             var email = emailField.value.trim();
 
-            if (email === '' || email === lastAttemptedEmail || ceremonyInProgress) {
+            if (email === '' || email === lastAttemptedEmail || ceremonyInProgress || formSubmitted) {
                 return;
             }
 
@@ -284,7 +329,10 @@
         }
 
         if (emailField.form) {
-            emailField.form.addEventListener('submit', abortActiveCeremony);
+            emailField.form.addEventListener('submit', function () {
+                formSubmitted = true;
+                abortActiveCeremony();
+            });
         }
 
         function abortActiveCeremony() {
@@ -313,6 +361,16 @@
 
                 if (!optionsData.available) {
                     return; // no passkey for this email - let them type their password
+                }
+
+                if (formSubmitted) {
+                    // THE actual fix for the bug described above -
+                    // checked here specifically because this is the
+                    // last point before the browser's own native prompt
+                    // would be triggered, and it does not depend on
+                    // activeAbortController already existing the way
+                    // abortActiveCeremony() does.
+                    return;
                 }
 
                 // parseRequestOptionsFromJSON() is the WebAuthn Level 3
@@ -482,7 +540,7 @@
         var statusEl = document.querySelector(STATUS_SELECTOR);
 
         button.addEventListener('click', function () {
-            if (ceremonyInProgress) {
+            if (ceremonyInProgress || formSubmitted) {
                 return; // avoids a second overlapping navigator.credentials.get() call
             }
 
@@ -536,6 +594,16 @@
 
                 var optionsData = await optionsResponse.json();
                 updateCsrfToken(optionsData);
+
+                if (formSubmitted) {
+                    // Shared with Feature 1's identical check - see
+                    // formSubmitted's own declaration (shared state,
+                    // top of file) for the full explanation. The normal
+                    // login form was submitted while this was still
+                    // waiting on options() - don't trigger the native
+                    // prompt on what's about to be a different page.
+                    return;
+                }
 
                 // parseRequestOptionsFromJSON() is the WebAuthn Level 3
                 // JSON helper - see this package's README ("Browser

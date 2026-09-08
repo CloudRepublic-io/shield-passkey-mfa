@@ -965,6 +965,82 @@ after 20 seconds instead of up to two minutes, and gives the visitor an
 honest "that took too long, please try again" message rather than
 nothing at all.
 
+## A leftover prompt appearing on the next page - fixed
+
+**Fixed in the current version.** A real report showed the browser's
+native passkey prompt appearing on the 2FA challenge page - after a
+normal email+password login had already been submitted and navigated
+away from the login page entirely. Most likely to happen when both
+fields arrive via autofill and the visitor clicks "login" immediately,
+without ever tabbing through the fields manually (the trigger for
+either login-shortcut feature).
+
+**The mechanism:** if the normal login form gets submitted while either
+feature's own `options()` request is still in flight, that feature's
+`AbortController` doesn't exist yet - there's nothing to call `.abort()`
+on, so the existing abort-on-submit handling silently did nothing. The
+still-running async code then went on to call
+`navigator.credentials.get()` *after* the browser had already begun
+navigating to the next page. Since the browser's own native dialog is
+chrome-level UI, not part of the page's own DOM, it could still render
+even once the new page had loaded - appearing as a confusing,
+unexpected extra prompt on the 2FA challenge page.
+
+**Fixed** via a shared flag, checked independently of whether either
+feature's own `AbortController` happens to exist yet, at every point a
+native prompt could otherwise be triggered - not just relying on the
+abort mechanism working, which depended on timing that autofill could
+easily race past. See `formSubmitted`'s own declaration in
+`passkey-login.js`'s shared state section for the full account.
+
+## Why the button can offer the "wrong" identity, and the email-based feature can't
+
+Worth understanding as a genuine, structural trade-off between the two
+login-shortcut features, not a bug in either one.
+
+**This was never a security risk, confirmed via multiple independent
+sources on how WebAuthn's own `rpId` restriction works:** it's enforced
+as a hard, cryptographic check at the authenticator itself, not just a
+browser UI convention - a credential genuinely registered for a
+different site cannot be signed for yours, even if a user is
+deliberately tricked into trying (this is the same property that makes
+passkeys phishing-resistant in the first place). So picking an
+unexpected identity from the button's picker was never able to log
+anyone into the wrong account or leak anything - at worst it fails, as
+covered above.
+
+**What's actually happening, most likely:** if a visitor is signed
+into more than one account/profile on the same device (common with
+Google or Microsoft accounts specifically), the browser's own passkey
+picker can offer a "use a different account" option that switches
+profiles entirely - this is a browser/OS-level UI decision, not
+something a website's `PublicKeyCredentialRequestOptions` has any
+control over. Only *after* a visitor picks one of these does the
+browser attempt to find a matching credential in that other profile,
+which is what leads to the stuck ceremony covered above when no match
+exists there.
+
+**Why the email-based feature (`$enableEarlyAuthentication`) doesn't
+have this problem at all:** it already knows the account before
+asking, so it specifies `allowCredentials` - a list of the exact
+credential IDs acceptable for this request. With `allowCredentials`
+specified, the browser has nothing else to offer at all; there is no
+"choose a different account" option for it to show, structurally,
+because the request itself only ever asked about specific,
+named credentials. This is a genuine capability the discoverable
+button cannot have, precisely because not needing to know the account
+up front is the entire point of it.
+
+**The practical trade-off, not a fix:** the discoverable button is the
+more convenient option (no email needed at all), at the cost of this
+small, real risk if a visitor has multiple accounts/profiles on the
+same device. The email-based feature is the safer option in this
+specific regard, at the cost of needing the email first. Consider
+offering the button as a convenience layered on top of the email-based
+flow, rather than as a full replacement for it, and let the 20-second
+timeout above serve as the safety net for the case where someone does
+pick the wrong identity.
+
 ## Tests
 
 **If you're using `shield-mfa-dispatcher`** (or anything else that
