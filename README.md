@@ -182,12 +182,16 @@ anything) and no visible client-side error either.
 Both `PasskeyEarlyAuthController::options()` and `::verify()` now
 return the current token (`csrf_token()`/`csrf_hash()` - CI4's own
 "always available" functions for exactly this) in their JSON response;
-`passkey-early-auth.js` updates both its own tracked copy and the
-page's actual hidden CSRF field after every response, so its next call
-- and any fallback to the normal password form - always submits with a
-valid, current token. See `PasskeyEarlyAuthController::options()`'s own
-doc comment, and the "CSRF TOKEN HANDLING" section of
-`passkey-early-auth.js`'s own header comment, for the full account.
+`passkey-login.js` (this feature's reference JS - see "Optional:
+trigger a passkey prompt from the login form" below; it's now
+combined with the discoverable-login feature's own JS into one file,
+see "A single, combined reference JS file" further down) updates both
+its own tracked copy and the page's actual hidden CSRF field after
+every response, so its next call - and any fallback to the normal
+password form - always submits with a valid, current token. See
+`PasskeyEarlyAuthController::options()`'s own doc comment, and the
+"CSRF TOKEN HANDLING" section of `passkey-login.js`'s own header
+comment, for the full account.
 
 **If you're not using early authentication at all**, this specific bug
 never applied to you, and the original "login failing with multiple
@@ -274,10 +278,10 @@ user - `account/passkeys` isn't limited to one).
 ```
 src/
   Assets/
-    passkey-early-auth.js               <- reference JS for the optional "trigger a passkey
-                                            prompt on email blur" feature - not auto-loaded
-    passkey-discoverable-auth.js        <- reference JS for the optional "Login with a passkey"
-                                            button (no email needed) - not auto-loaded
+    passkey-login.js                     <- reference JS for BOTH optional login-shortcut
+                                            features below, combined into one file - not
+                                            auto-loaded (see "A single, combined reference
+                                            JS file" further down)
   Authentication/Actions/
     PasskeyMfa.php                       <- 'login' action: verification only
     PasskeyActivator.php                 <- 'register' action: optional setup at signup
@@ -394,8 +398,8 @@ replace the relevant block in each view's `<script>` with the classic
 manual conversion pattern (widely documented at
 [webauthn.guide](https://webauthn.guide/)) instead.
 
-`src/Assets/passkey-early-auth.js` (the optional login-page-blur
-feature) additionally relies on `navigator.credentials.get()`'s own
+`src/Assets/passkey-login.js`'s email-blur feature (Feature 1 in that
+file) additionally relies on `navigator.credentials.get()`'s own
 `signal` option (an `AbortController`/`AbortSignal`, used to cancel an
 in-flight ceremony the moment the visitor moves on to the password
 field) - confirmed via MDN's own documentation and W3C's own
@@ -614,18 +618,19 @@ own doc comment for the full account.
 visitor sees the browser's own success indication) but nothing happens
 afterward - no error visible anywhere, and `verify()` never gets
 called (confirm via your browser's own Network tab: only the
-`options` request fires):** `passkey-early-auth.js` used to also abort
-an in-flight ceremony on the password field's own `focus` event, not
-just `input` - suspected (not fully confirmed) to have been triggered
-by Edge's own dialog/focus-management behavior around the native
-passkey prompt, causing `navigator.credentials.get()` to reject with
-an `AbortError` immediately after the visitor completed it
-successfully. `focus` is removed - only `input` (the visitor actually
-typing) and the form's own `submit` event still cancel an in-flight
-ceremony. The script's own diagnostic `console.warn()` call is also no
-longer commented out by default, so if this specific fix turns out to
-be incomplete, the real error name will be visible in the browser's own
-DevTools console on the next report, rather than needing another round
+`options` request fires):** `passkey-login.js`'s email-blur feature
+used to also abort an in-flight ceremony on the password field's own
+`focus` event, not just `input` - suspected (not fully confirmed) to
+have been triggered by Edge's own dialog/focus-management behavior
+around the native passkey prompt, causing `navigator.credentials.get()`
+to reject with an `AbortError` immediately after the visitor completed
+it successfully. `focus` is removed - only `input` (the visitor
+actually typing) and the form's own `submit` event still cancel an
+in-flight ceremony. The script's own diagnostic `console.warn()` call
+is also no longer commented out by default, so if this specific fix
+turns out to be incomplete, the real error name will be visible in the
+browser's own DevTools console on the next report, rather than needing
+another round
 of silent failures to narrow down. See "CANCELLING" in that file's own
 header comment for the full account.
 
@@ -698,14 +703,17 @@ it should.
    `auth/a/*` specifically, add these two routes to whatever your
    actual exclusion list is instead.
 
-4. Copy `src/Assets/passkey-early-auth.js` into your own login page's
+4. Copy `src/Assets/passkey-login.js` into your own login page's
    JavaScript (or adapt the logic inline) - this is a reference
    implementation, not something this package loads automatically
-   anywhere. Adjust the four things called out at the top of that
-   file to match your actual login form: the email field's selector,
-   the password field's selector (used to know when to cancel an
-   in-flight passkey prompt - see "Cancelling" in that file's own
-   header comment), your app's CSRF token field name
+   anywhere. It also contains the separate "Login with a passkey"
+   button feature (see "Optional: 'Login with a passkey' button"
+   below) - copying this one file covers both, in either combination.
+   Adjust the settings called out in "FEATURE 1 DETAIL" in that file's
+   own header comment to match your actual login form: the email
+   field's selector, the password field's selector (used to know when
+   to cancel an in-flight passkey prompt - see "CANCELLING" in that
+   same comment), the shared CSRF token field name
    (`Config\Security::$tokenName` - CodeIgniter's default is
    `csrf_test_name`), and the route paths if you changed the route
    names from the defaults.
@@ -851,18 +859,111 @@ comment for the fuller account.
 3. Add a button to your login page (e.g. `<button type="button"
    id="passkey-discoverable-login">Login with a passkey</button>`,
    optionally with a status element alongside it), then copy
-   `src/Assets/passkey-discoverable-auth.js` into your own login page's
+   `src/Assets/passkey-login.js` into your own login page's
    JavaScript - a reference implementation, not something this package
-   loads automatically anywhere. Adjust the three things called out at
-   the top of that file: the button/status selectors, your app's CSRF
-   token field name, and the route paths if you changed them from the
-   defaults.
+   loads automatically anywhere. If you're also using "trigger a
+   passkey prompt from the login form" above, this is the SAME file -
+   you only need to copy it once; both features live in it together
+   (see "A single, combined reference JS file" below). Adjust the
+   settings called out in "FEATURE 2 DETAIL" in that file's own header
+   comment: the button/status selectors, the shared CSRF token field
+   name, and the route paths if you changed them from the defaults.
 4. Test it in a real browser with a real, discoverable passkey already
    registered - same standing caveat as everywhere else in this
    README: "the code looks right" is meaningfully less reassuring for
    anything WebAuthn-shaped than for ordinary application code. If the
    picker appears but shows nothing, that's most likely the
    discoverability prerequisite above, not a bug in the script.
+
+## A single, combined reference JS file
+
+`src/Assets/passkey-login.js` contains **both** login-shortcut features
+described above, combined into one file - copy it once, and either or
+both features activate depending on which elements your login page
+actually has (an email field for Feature 1, a button for Feature 2,
+or both). This wasn't just for convenience - it fixed a real,
+confirmed bug that existed specifically because the two features used
+to ship as separate files.
+
+**The bug, if you're using (or upgrading from) an older version of
+this package that shipped `passkey-early-auth.js` and
+`passkey-discoverable-auth.js` as two separate files:** using both
+features together on the same login page, the two independently-
+designed scripts could start two competing WebAuthn ceremonies at
+once - clicking the "Login with a passkey" button while the email
+field still had a value in it (typed, or left over from a previous
+attempt) could cause the *other* feature's own blur-triggered ceremony
+to also fire, if focus happened to pass through the email field along
+the way.
+
+**What this looked like in practice:** the first attempt worked
+correctly; cancelling it and trying again produced a visibly different,
+inconsistent browser prompt, and server-side logs showed
+`PasskeyMfa completeAuthentication` (the *known-user*, email-based
+method) being called even though the visitor only ever clicked the
+discoverable button - each script's own ceremony has a correctly
+separate, independently-scoped session key, so neither had any way of
+knowing the other one was *also* mid-ceremony, and whichever response
+actually came back from the browser ended up checked against the wrong
+one's stored challenge, producing `AuthenticatorResponseVerificationException: Invalid challenge`.
+
+**Fixed by combining both features into this one file.** An earlier,
+two-file version fixed this with a shared global flag
+(`window.__passkeyMfaCeremonyInProgress`) both scripts checked before
+starting a ceremony - this consolidated version does the identical
+coordination more directly, via one local `ceremonyInProgress` variable
+both features share naturally, since they now live in the same scope
+rather than needing a global to communicate across separate files.
+Functionally equivalent outcome, cleaner mechanism. If you only enable
+one of the two features, this coordination is inert and has no effect
+either way - you do not need both an email field and a button on the
+same page for this file to work correctly with just one of them
+present.
+
+If you're upgrading from the two-file version: delete
+`passkey-early-auth.js` and `passkey-discoverable-auth.js` from
+wherever you copied them into your own app, and replace both with this
+one file instead - the route paths, config settings, and server-side
+controllers are all unchanged, only the client-side script itself
+was consolidated.
+
+## A stuck browser ceremony can block every passkey operation on the device
+
+A real report confirmed a genuinely severe browser-level behavior,
+worth understanding even though this package can't prevent it
+directly. Choosing a passkey identity in the browser's own picker that
+isn't actually registered with this site - something the "Login with a
+passkey" button's discoverable request can show, since it displays
+every identity the platform has for its own ecosystem, not just ones
+this app knows about - can leave `navigator.credentials.get()` hanging
+for the platform's own full internal timeout (observed at roughly 2
+minutes) before it finally rejects with a generic
+`NotAllowedError: The operation either timed out or was not allowed`.
+
+**Worse than just a slow failure:** during that entire window, the
+same report showed the browser itself refusing to start *any other*
+WebAuthn ceremony at all, anywhere on the device - including a
+completely unrelated one, like the normal password login's own
+separate 2FA challenge. From the outside this looked like choosing the
+wrong identity in the button's picker had "broken" passkey login
+entirely, until the roughly-2-minute window passed and everything
+started working again. This is confirmed, deliberate browser behavior
+(the same privacy protection covered above - a browser cannot reveal
+*why* a WebAuthn operation is refused, so a stuck internal resolution
+and a straightforward rejection look identical from a website's own
+JavaScript), not a bug in this package, and not something a website's
+own code can bypass or speed up.
+
+**Mitigated, not fixed:** both features in `passkey-login.js` now
+impose their own 20-second client-side timeout (via `AbortController`),
+so at least the page itself gives up and re-enables its own UI with a
+clear message well before the browser's own much longer timeout would.
+This does **not** prevent the underlying browser-level lock on other
+ceremonies during that window - only the browser itself controls that
+- but it does mean your own login page stops looking silently stuck
+after 20 seconds instead of up to two minutes, and gives the visitor an
+honest "that took too long, please try again" message rather than
+nothing at all.
 
 ## Tests
 

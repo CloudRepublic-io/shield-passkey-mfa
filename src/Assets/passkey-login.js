@@ -51,6 +51,27 @@
  * one of the two features, this coordination is inert and has no
  * effect either way.
  *
+ * A STUCK BROWSER CEREMONY CAN BLOCK EVERY PASSKEY OPERATION ON THE
+ * DEVICE - CONFIRMED, REAL BROWSER BEHAVIOR BOTH FEATURES NOW WORK
+ * AROUND: a real report showed that choosing a passkey identity in the
+ * browser's own picker that ISN'T actually registered with this site -
+ * something Feature 2's discoverable request can show, since it
+ * displays every identity the platform has for its own ecosystem, not
+ * just ones this app knows about - can leave navigator.credentials.get()
+ * hanging for the platform's own full internal timeout (observed at
+ * roughly 2 minutes) before it finally rejects. Worse: during that
+ * entire window, the same report showed the BROWSER ITSELF (not just
+ * this script) refusing to start any OTHER WebAuthn ceremony at all,
+ * anywhere on the device - including a completely unrelated one, like
+ * the normal password login's own separate 2FA challenge, or the OTHER
+ * feature in this same file. This package has no way to prevent that
+ * browser-level lock - it isn't something a website's own JavaScript
+ * can control - but both features now impose their own 20-second
+ * client-side timeout (via AbortController), so at least THIS page
+ * gives up and re-enables itself with a clear message well before the
+ * browser's own much longer timeout would, rather than leaving the UI
+ * looking silently stuck for up to two minutes.
+ *
  * CSRF TOKEN HANDLING - CONFIRMED, REAL BUG FIXED HERE, and the most
  * likely reason either feature can appear to do "nothing at all," even
  * for a visitor who DOES have a registered passkey: CodeIgniter's own
@@ -306,16 +327,40 @@
                 // needing to manually dismiss the browser's own dialog.
                 activeAbortController = new AbortController();
 
+                // CONFIRMED, REAL BROWSER BEHAVIOR THIS WORKS AROUND -
+                // see the identical timeout in this file's Feature 2
+                // section for the full explanation: a stuck
+                // navigator.credentials.get() call (e.g. from an
+                // unusual identity-selection scenario) can hang for the
+                // platform's own full internal timeout (observed at
+                // roughly 2 minutes), and during that window the
+                // browser itself may refuse to start ANY other WebAuthn
+                // ceremony at all, anywhere on the device. This timeout
+                // means this feature gives up well before that. Tracked
+                // separately from a genuine user cancellation
+                // (timedOut, below) specifically so lastAttemptedEmail
+                // is only cleared for THIS case - a real cancellation
+                // should still leave it set, or the earlier fix for
+                // "cancelling, then re-blurring the same untouched
+                // email re-prompts again" would regress right back.
+                var timedOut  = false;
+                var timeoutId = setTimeout(function () {
+                    timedOut = true;
+                    abortActiveCeremony();
+                }, 20000); // 20s
+
                 // Opens the browser's native passkey prompt. Rejects if
                 // the user cancels/dismisses it, if
-                // abortActiveCeremony() fires, or on various other
-                // WebAuthn errors - caught below, always falling
-                // through silently either way.
+                // abortActiveCeremony() fires (including via the
+                // timeout above), or on various other WebAuthn errors -
+                // caught below, always falling through silently either
+                // way.
                 var credential = await navigator.credentials.get({
                     publicKey: publicKey,
                     signal: activeAbortController.signal,
                 });
 
+                clearTimeout(timeoutId);
                 activeAbortController = null;
 
                 var verifyResponse = await fetch(VERIFY_URL, {
@@ -336,20 +381,33 @@
                 // that fallback form still has a current, valid token
                 // to submit with.
             } catch (error) {
+                clearTimeout(timeoutId);
                 activeAbortController = null;
+
+                if (timedOut) {
+                    // Our own timeout fired, not a deliberate user
+                    // cancellation - clearing this allows a retry for
+                    // the SAME email without the visitor needing to
+                    // first change it, unlike a genuine cancellation
+                    // (see the comment above timedOut's own
+                    // declaration for why those two cases are handled
+                    // differently).
+                    lastAttemptedEmail = null;
+                }
+
                 // Includes the user cancelling the browser's own
                 // passkey prompt (error.name === 'NotAllowedError',
                 // typically), this script itself aborting the ceremony
                 // via abortActiveCeremony() (error.name ===
-                // 'AbortError'), or any other WebAuthn error.
-                // Deliberately does NOT block or visibly interrupt the
-                // form either way - the visitor always still has their
-                // password to fall back on - but DOES log to the
-                // console, client-side only (visible in the browser's
-                // own DevTools, not to the visitor, and not sent
-                // anywhere) - see "SUSPECTED... EDGE-SPECIFIC ABORT
-                // ISSUE" above for why this is active by default rather
-                // than commented out.
+                // 'AbortError', including via the timeout above), or
+                // any other WebAuthn error. Deliberately does NOT block
+                // or visibly interrupt the form either way - the
+                // visitor always still has their password to fall back
+                // on - but DOES log to the console, client-side only
+                // (visible in the browser's own DevTools, not to the
+                // visitor, and not sent anywhere) - see "SUSPECTED...
+                // EDGE-SPECIFIC ABORT ISSUE" above for why this is
+                // active by default rather than commented out.
                 console.warn('Early passkey authentication skipped (' + (error && error.name ? error.name : 'unknown error') + '):', error);
             } finally {
                 ceremonyInProgress = false;
@@ -436,11 +494,38 @@
             button.disabled    = true;
             setStatus('');
 
+            // CONFIRMED, REAL BROWSER BEHAVIOR THIS WORKS AROUND: a
+            // real report showed that selecting a passkey identity NOT
+            // actually registered with this site - visible in the
+            // browser's own picker, since a discoverable request shows
+            // every identity the platform has for its own ecosystem,
+            // not just ones this app knows about - can leave
+            // navigator.credentials.get() hanging for the PLATFORM's
+            // own full internal timeout (observed at roughly 2
+            // minutes) before it finally rejects. Worse, during that
+            // entire window the same report showed the BROWSER ITSELF
+            // (not just this script) refusing to start any OTHER
+            // WebAuthn ceremony at all, anywhere on the device -
+            // including a completely unrelated one, like the normal
+            // password login's own separate 2FA challenge. This
+            // package has no way to prevent that browser-level lock -
+            // it isn't something a website's own JavaScript can
+            // control - but this timeout at least means THIS button
+            // gives up and re-enables itself well before the
+            // browser's own timeout would, with a clear message,
+            // rather than leaving the page looking silently stuck for
+            // up to two minutes.
+            var timeoutController = new AbortController();
+            var timeoutId         = setTimeout(function () {
+                timeoutController.abort();
+            }, 20000); // 20s - generous for a genuine visitor picking a passkey, short enough not to feel broken
+
             try {
                 var optionsResponse = await fetch(OPTIONS_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: csrfBodyParam(),
+                    signal: timeoutController.signal,
                 });
 
                 if (!optionsResponse.ok) {
@@ -461,12 +546,16 @@
                 // No allowCredentials at all - the browser's own picker
                 // shows whichever discoverable credentials it has for
                 // this site's rpId, across every account.
-                var credential = await navigator.credentials.get({ publicKey: publicKey });
+                var credential = await navigator.credentials.get({
+                    publicKey: publicKey,
+                    signal: timeoutController.signal,
+                });
 
                 var verifyResponse = await fetch(VERIFY_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: 'credential=' + encodeURIComponent(JSON.stringify(credential.toJSON())) + '&' + csrfBodyParam(),
+                    signal: timeoutController.signal,
                 });
 
                 var verifyData = await verifyResponse.json();
@@ -480,11 +569,16 @@
 
                 setStatus('Could not sign you in with that passkey. Please try again, or use your password instead.');
             } catch (error) {
-                // Includes the visitor cancelling the browser's own
-                // picker (error.name === 'NotAllowedError', typically)
-                // - a normal, expected outcome, not treated as a
-                // genuine failure message.
-                if (error && error.name !== 'NotAllowedError' && error.name !== 'AbortError') {
+                if (error && error.name === 'AbortError') {
+                    // This is OUR OWN timeout firing (see above), not
+                    // the visitor cancelling anything - the browser's
+                    // own ceremony was still hanging after 20 seconds.
+                    setStatus('That took too long - please try again, or use your password instead.');
+                } else if (error && error.name !== 'NotAllowedError') {
+                    // NotAllowedError (visitor cancelling the browser's
+                    // own picker, most commonly) is a normal, expected
+                    // outcome, not treated as a genuine failure
+                    // message.
                     setStatus('Something went wrong signing you in with a passkey. Please try again, or use your password instead.');
                 }
 
@@ -494,6 +588,7 @@
                 // exactly what went wrong:
                 // console.warn('Discoverable passkey login skipped (' + (error && error.name ? error.name : 'unknown error') + '):', error);
             } finally {
+                clearTimeout(timeoutId);
                 ceremonyInProgress = false;
                 button.disabled    = false;
             }
