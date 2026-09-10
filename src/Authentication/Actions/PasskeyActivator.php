@@ -7,11 +7,13 @@ namespace PasskeyMfa\Authentication\Actions;
 use CodeIgniter\HTTP\IncomingRequest;
 use CodeIgniter\HTTP\Response;
 use CodeIgniter\Shield\Authentication\Actions\ActionInterface;
+use CodeIgniter\Shield\Authentication\Actions\ConditionalActionInterface;
 use CodeIgniter\Shield\Authentication\Authenticators\Session;
 use CodeIgniter\Shield\Entities\User;
 use CodeIgniter\Shield\Exceptions\RuntimeException;
 use Config\PasskeyMfa as PasskeyMfaConfig;
 use PasskeyMfa\Libraries\CompletesPendingAction;
+use PasskeyMfa\Libraries\DiagnosticLog;
 use PasskeyMfa\Libraries\PasskeyIdentityStore;
 
 /**
@@ -42,8 +44,47 @@ use PasskeyMfa\Libraries\PasskeyIdentityStore;
  * TotpActivator's class doc comment (in shield-totp-mfa) for the full
  * explanation of the $user->active check in verify() below that makes
  * this safe.
+ *
+ * IMPLEMENTS ConditionalActionInterface - CONFIRMED, REAL BUG FIXED
+ * HERE: a real report showed a user who already had a registered,
+ * enrolled passkey still being routed into THIS class's enrollment
+ * flow on a later, ordinary login attempt (register=PasskeyActivator,
+ * login=MfaDispatcher) - despite shield-mfa-dispatcher's own
+ * MfaDispatcher::resolveRequiredMethod() correctly resolving
+ * isEnrolled() to true for that user, confirmed via that package's own
+ * diagnostic logging. Direct-URI and log-based tracing confirmed
+ * MfaDispatcher::show() (the 'login' slot) never ran at all for that
+ * request - only THIS class's show() (the 'register' slot) did,
+ * meaning Shield itself decided the register slot was still the
+ * pending one.
+ *
+ * Confirmed against Shield's own official documentation on Auth
+ * Actions: a custom action can implement ConditionalActionInterface's
+ * appliesTo(User $user): bool to tell Shield directly whether it
+ * should be considered pending for a given user at all - "when
+ * appliesTo() returns false, Shield does not start the action and
+ * ignores stored identities for that action while the condition
+ * remains false." Without this, Shield apparently still discovers a
+ * "pending" register action for a user with a permanent, matching
+ * passkey identity even when they've already completed registration
+ * long ago and are now simply logging in again - PasskeyActivator and
+ * PasskeyMfa share the same underlying identity type by design (see
+ * this file's own doc comment above), so the mere existence of that
+ * identity was apparently enough to make Shield treat 'register' as
+ * still relevant, ahead of 'login', for every subsequent login
+ * indefinitely.
+ *
+ * appliesTo() below returns false once the user already has a
+ * registered passkey, which - per Shield's own documented behavior -
+ * should stop Shield from ever treating this action as pending for
+ * them again. This is a strong, evidence-based fix, not a fully
+ * root-caused one: Shield's own internal slot-selection mechanism
+ * beyond appliesTo() was not directly inspected (no access to Shield's
+ * own source in this package's own development environment) - if this
+ * doesn't fully resolve the behavior, that internal mechanism is the
+ * next thing to investigate.
  */
-class PasskeyActivator implements ActionInterface
+class PasskeyActivator implements ActionInterface, ConditionalActionInterface
 {
     use CompletesPendingAction;
 
@@ -56,9 +97,53 @@ class PasskeyActivator implements ActionInterface
         $this->config = config('PasskeyMfa');
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * Confirmed via Shield's own docs: "may be called more than once
+     * while Shield checks for actions, so keep it deterministic, free
+     * of side effects, and fail closed when the condition cannot be
+     * determined." hasEnrolled() is a plain, read-only DB check - no
+     * side effects, and deterministic for a given user's stored state.
+     * "Fail closed" here means: if this can't be determined for some
+     * reason, this method should lean toward NOT applying (false)
+     * rather than forcing enrollment on someone who may already be
+     * enrolled - hasEnrolled() itself doesn't throw under normal
+     * conditions, so this doesn't need its own additional guard beyond
+     * that.
+     */
+    public function appliesTo(User $user): bool
+    {
+        return ! $this->store->hasEnrolled($user);
+    }
+
+    /**
+     * TEMPORARY DIAGNOSTIC LOGGING added below - part of a live
+     * investigation (see shield-mfa-dispatcher's own MfaDispatcher/
+     * MethodEnrollmentChecker diagnostic logging) into a real report:
+     * a user who is confirmed (via that other logging) to already be
+     * enrolled in passkey still saw the ENROLLMENT prompt on a
+     * subsequent login, despite MfaDispatcher::resolveRequiredMethod()
+     * correctly resolving isEnrolled() to true for them. This logs
+     * user_id and the current URI whenever this method runs, so we can
+     * confirm directly whether Shield is invoking THIS action (the
+     * 'register' slot) during what should be a normal login attempt -
+     * which would point at Shield's own action-slot resolution, not
+     * this package's or shield-mfa-dispatcher's own enrollment logic
+     * (already confirmed correct). Gated to only ever write when
+     * ENVIRONMENT is 'development' (see DiagnosticLog's own doc
+     * comment) so this never accumulates user_id values in a
+     * production log from ordinary registrations.
+     */
     public function show(): string
     {
         $user = $this->getPendingUser();
+
+        DiagnosticLog::write(
+            'info',
+            'PasskeyActivator show(): running for user_id {user_id}, current URI {uri}.',
+            ['user_id' => $user->id, 'uri' => (string) current_url(true)]
+        );
 
         $optionsJson = $this->store->beginRegistration($user, $user->email ?? ('user-' . $user->id));
 

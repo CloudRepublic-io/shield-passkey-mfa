@@ -241,4 +241,46 @@ final class PasskeyActivatorTest extends CIUnitTestCase
     // (testVerifyForAnAlreadyActiveUserRedirectsToLoginNotRegistration),
     // since TOTP's success path just needs a matching 6-digit code,
     // not real cryptography.
+
+    // -------------------------------------------------------------------
+    // appliesTo() - THE confirmed fix for a real bug: a user with an
+    // already-registered passkey was still being routed into THIS
+    // class's own enrollment flow on later, ordinary logins. See this
+    // class's own doc comment for the full, confirmed account.
+    // -------------------------------------------------------------------
+
+    private function seedCredential(User $user): void
+    {
+        model(\PasskeyMfa\Models\PasskeyCredentialModel::class)->insert([
+            'user_id'                      => $user->id,
+            'credential_id'                => \PasskeyMfa\Libraries\Base64Url::encode(random_bytes(16)),
+            'public_key_credential_source' => '{}',
+            'name'                         => 'Test credential',
+            'last_used_at'                 => null,
+        ]);
+    }
+
+    public function testAppliesToReturnsTrueForAUserWithNoPasskeyRegistered(): void
+    {
+        $user      = $this->makeUser();
+        $activator = new PasskeyActivator();
+
+        $this->assertTrue($activator->appliesTo($user));
+    }
+
+    /**
+     * THE regression test for the actual bug - see this class's own
+     * doc comment for the full, confirmed account of a real user
+     * routed back into enrollment despite already having a registered
+     * passkey.
+     */
+    public function testAppliesToReturnsFalseForAUserWithAnExistingPasskey(): void
+    {
+        $user = $this->makeUser();
+        $this->seedCredential($user);
+
+        $activator = new PasskeyActivator();
+
+        $this->assertFalse($activator->appliesTo($user));
+    }
 }

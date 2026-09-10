@@ -71,7 +71,7 @@ class PasskeyIdentityStore
     /**
      * The specific reason completeAuthentication() last returned
      * false, if any - null after a successful call, or before any
-     * call has been made. TEMPORARY DIAGNOSTIC addition: log_message()
+     * call has been made. DIAGNOSTIC addition: plain log_message()
      * alone turned out not to be a reliable way to surface what's
      * actually failing (a real report came back with nothing written
      * to the app's own log at all, despite log_message() calls at
@@ -83,6 +83,12 @@ class PasskeyIdentityStore
      * message instead, which doesn't depend on any logging
      * configuration at all - the same mechanism the view already
      * renders session('error') through, already confirmed working.
+     * (The logging itself has since been routed through DiagnosticLog
+     * - see that class's own doc comment - so it only ever writes in a
+     * development environment; the flash-message fallback above is
+     * also gated the same way now, in PasskeyMfa::verify() itself, for
+     * the same reason - showing this reason to end users was never
+     * meant to be a permanent production behavior.)
      */
     public ?string $lastFailureReason = null;
 
@@ -368,9 +374,11 @@ class PasskeyIdentityStore
      * false with zero visibility into why, which made a real reported
      * bug (login failing specifically once a user has multiple
      * registered passkeys) impossible to diagnose from the outside.
-     * Safe to leave in permanently - log_message('error', ...) only
-     * writes when something has already gone wrong, so this adds no
-     * overhead to the success path.
+     * Safe to leave in permanently - only ever writes when something
+     * has already gone wrong, adding no overhead to the success path,
+     * and (via DiagnosticLog) only ever writes in a development
+     * environment in the first place - see that class's own doc
+     * comment for why.
      */
     public function completeAuthentication(User $user, string $responseJson): bool
     {
@@ -380,7 +388,7 @@ class PasskeyIdentityStore
 
         if ($optionsJson === null) {
             $this->lastFailureReason = 'no pending options in session';
-            log_message('error', 'PasskeyMfa completeAuthentication: no pending options in session for user_id {user_id}.', ['user_id' => $user->id]);
+            DiagnosticLog::write('error', 'PasskeyMfa completeAuthentication: no pending options in session for user_id {user_id}.', ['user_id' => $user->id]);
 
             return false;
         }
@@ -402,7 +410,7 @@ class PasskeyIdentityStore
 
             if (! $publicKeyCredential->response instanceof AuthenticatorAssertionResponse) {
                 $this->lastFailureReason = 'deserialized response was not an AuthenticatorAssertionResponse';
-                log_message('error', 'PasskeyMfa completeAuthentication: deserialized response was not an AuthenticatorAssertionResponse for user_id {user_id}.', ['user_id' => $user->id]);
+                DiagnosticLog::write('error', 'PasskeyMfa completeAuthentication: deserialized response was not an AuthenticatorAssertionResponse for user_id {user_id}.', ['user_id' => $user->id]);
 
                 return false;
             }
@@ -412,14 +420,14 @@ class PasskeyIdentityStore
 
             if ($row === null) {
                 $this->lastFailureReason = "no stored credential row found for credential_id {$credentialIdB64}";
-                log_message('error', 'PasskeyMfa completeAuthentication: no stored credential row found for credential_id {credential_id} (user_id {user_id}).', ['credential_id' => $credentialIdB64, 'user_id' => $user->id]);
+                DiagnosticLog::write('error', 'PasskeyMfa completeAuthentication: no stored credential row found for credential_id {credential_id} (user_id {user_id}).', ['credential_id' => $credentialIdB64, 'user_id' => $user->id]);
 
                 return false;
             }
 
             if ((int) $row['user_id'] !== $user->id) {
                 $this->lastFailureReason = "credential_id {$credentialIdB64} belongs to a different user_id ({$row['user_id']}) than the expected {$user->id}";
-                log_message('error', 'PasskeyMfa completeAuthentication: credential_id {credential_id} belongs to user_id {row_user_id}, not the expected user_id {user_id}.', ['credential_id' => $credentialIdB64, 'row_user_id' => $row['user_id'], 'user_id' => $user->id]);
+                DiagnosticLog::write('error', 'PasskeyMfa completeAuthentication: credential_id {credential_id} belongs to user_id {row_user_id}, not the expected user_id {user_id}.', ['credential_id' => $credentialIdB64, 'row_user_id' => $row['user_id'], 'user_id' => $user->id]);
 
                 return false;
             }
@@ -445,7 +453,7 @@ class PasskeyIdentityStore
             );
         } catch (\Throwable $e) {
             $this->lastFailureReason = get_class($e) . ': ' . $e->getMessage();
-            log_message('error', 'PasskeyMfa completeAuthentication: {exception}', ['exception' => $e]);
+            DiagnosticLog::write('error', 'PasskeyMfa completeAuthentication: {exception}', ['exception' => $e]);
 
             return false;
         }
@@ -531,7 +539,7 @@ class PasskeyIdentityStore
 
         if ($optionsJson === null) {
             $this->lastFailureReason = 'no pending discoverable options in session';
-            log_message('error', 'PasskeyMfa completeDiscoverableAuthentication: no pending options in session.');
+            DiagnosticLog::write('error', 'PasskeyMfa completeDiscoverableAuthentication: no pending options in session.');
 
             return null;
         }
@@ -553,7 +561,7 @@ class PasskeyIdentityStore
 
             if (! $publicKeyCredential->response instanceof AuthenticatorAssertionResponse) {
                 $this->lastFailureReason = 'deserialized response was not an AuthenticatorAssertionResponse';
-                log_message('error', 'PasskeyMfa completeDiscoverableAuthentication: deserialized response was not an AuthenticatorAssertionResponse.');
+                DiagnosticLog::write('error', 'PasskeyMfa completeDiscoverableAuthentication: deserialized response was not an AuthenticatorAssertionResponse.');
 
                 return null;
             }
@@ -563,7 +571,7 @@ class PasskeyIdentityStore
 
             if ($row === null) {
                 $this->lastFailureReason = "no stored credential row found for credential_id {$credentialIdB64}";
-                log_message('error', 'PasskeyMfa completeDiscoverableAuthentication: no stored credential row found for credential_id {credential_id}.', ['credential_id' => $credentialIdB64]);
+                DiagnosticLog::write('error', 'PasskeyMfa completeDiscoverableAuthentication: no stored credential row found for credential_id {credential_id}.', ['credential_id' => $credentialIdB64]);
 
                 return null;
             }
@@ -576,7 +584,7 @@ class PasskeyIdentityStore
 
             if ($candidateUser === null) {
                 $this->lastFailureReason = "credential_id {$credentialIdB64} references a user_id ({$row['user_id']}) that no longer exists";
-                log_message('error', 'PasskeyMfa completeDiscoverableAuthentication: credential_id {credential_id} references a user_id that no longer exists.', ['credential_id' => $credentialIdB64]);
+                DiagnosticLog::write('error', 'PasskeyMfa completeDiscoverableAuthentication: credential_id {credential_id} references a user_id that no longer exists.', ['credential_id' => $credentialIdB64]);
 
                 return null;
             }
@@ -602,7 +610,7 @@ class PasskeyIdentityStore
             );
         } catch (\Throwable $e) {
             $this->lastFailureReason = get_class($e) . ': ' . $e->getMessage();
-            log_message('error', 'PasskeyMfa completeDiscoverableAuthentication: {exception}', ['exception' => $e]);
+            DiagnosticLog::write('error', 'PasskeyMfa completeDiscoverableAuthentication: {exception}', ['exception' => $e]);
 
             return null;
         }

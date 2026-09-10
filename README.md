@@ -305,6 +305,8 @@ src/
     CompletesPendingAction.php           <- shared "finish this pending action" trait
     CompletesEarlyLogin.php              <- shared login-completion trait for the two
                                              out-of-band passkey login features above
+    DiagnosticLog.php                    <- gates all diagnostic log_message() calls in
+                                             this package to a development environment only
   Models/PasskeyCredentialModel.php
   Views/
     passkey_activator_enroll.php         <- registration ceremony + skip (registration)
@@ -511,6 +513,63 @@ this class gets reused unmodified as a login-time forced-setup step too
 about") for the full explanation of why `verify()` checks
 `$user->active` before activating/redirecting, and why that one check
 was all that was needed to make this safe for both contexts.
+
+## A user with an existing passkey was still routed into enrollment - fixed
+
+**Fixed in the current version.** A real report, if you're pairing this
+package with `shield-mfa-dispatcher` (`register = PasskeyActivator::class`,
+`login = MfaDispatcher::class`): a user who had already registered a
+passkey was still shown `PasskeyActivator`'s own enrollment prompt on a
+later, ordinary login - despite `shield-mfa-dispatcher`'s own
+`MfaDispatcher::resolveRequiredMethod()` correctly resolving them as
+already enrolled (confirmed via that package's own diagnostic
+logging). Direct log tracing confirmed `MfaDispatcher::show()` (the
+`login` slot) never ran at all for that request - only
+`PasskeyActivator::show()` (the `register` slot) did, meaning Shield
+itself decided the register slot was still the pending one for that
+user.
+
+**Root cause - CORRECTION, an earlier version of this note was
+factually wrong:** it claimed `PasskeyActivator` and `PasskeyMfa`
+"deliberately share the same underlying identity type." They don't -
+confirmed directly in each class's own `getType()`:
+`PasskeyActivator::getType()` returns
+`PasskeyIdentityStore::ID_TYPE_PASSKEY_ACTIVATE`, while
+`PasskeyMfa::getType()` returns the separate
+`PasskeyIdentityStore::ID_TYPE_PASSKEY`. The actual mechanism is more
+likely this instead: `ID_TYPE_PASSKEY_ACTIVATE` is a **temporary**
+marker created during registration (see "The permanent marker's secret
+used to collide" above for the broader activation-marker pattern this
+mirrors) - if that marker is never cleaned up once registration
+completes, Shield would keep finding a matching identity for the
+`register` slot's own type indefinitely, long after the user has
+finished registering and is simply logging in again on every
+subsequent visit. This is a plausible explanation for the observed
+behavior, not a directly-confirmed one - Shield's own internal
+identity-matching logic wasn't inspected line by line to prove it.
+
+Regardless of the exact mechanism, Shield's own docs on custom actions
+describe an `appliesTo(User $user): bool` method
+(`ConditionalActionInterface`) that tells Shield directly whether a
+given action should be considered pending for a user at all - "when
+`appliesTo()` returns false, Shield does not start the action and
+ignores stored identities for that action while the condition remains
+false." `PasskeyActivator` didn't implement this.
+
+**Fixed:** `PasskeyActivator` now implements `ConditionalActionInterface`,
+returning `false` from `appliesTo()` once the user already has a
+registered passkey. Per Shield's own documented behavior, this should
+stop Shield from ever treating `register` as pending for that user
+again - **confirmed working by a real user report**, so the fix itself
+is solid even though the full mechanistic explanation above is a
+well-reasoned inference, not something traced through Shield's own
+source line by line.
+
+If you're using `TotpActivator` or `WhatsAppActivator` from the sibling
+packages in this series with `shield-mfa-dispatcher` the same way, the
+identical fix has now been applied there too - see each package's own
+README for the same account, adapted to their own store's method
+names and identity types.
 
 ## If a page loads but shows nothing at all
 
@@ -1041,6 +1100,45 @@ flow, rather than as a full replacement for it, and let the 20-second
 timeout above serve as the safety net for the case where someone does
 pick the wrong identity.
 
+## Diagnostic logging is gated to development only
+
+`PasskeyActivator::show()`, `PasskeyMfa::verify()`, and
+`PasskeyIdentityStore::completeAuthentication()`/
+`completeDiscoverableAuthentication()` log detailed information
+(`user_id`, `credential_id`, exception details, and - for
+`PasskeyActivator::show()` - the current request URI) at various points
+while resolving and verifying passkey ceremonies. This was added while
+diagnosing several real, confirmed bugs across this package (see the
+sections above for each one's own account) and is left in permanently,
+since it's genuinely useful the next time something in this flow needs
+diagnosing.
+
+**A real concern, worth addressing directly:** logging `user_id` and
+`credential_id` values on every passkey attempt isn't something that
+should silently accumulate in a production application's log just
+because a past investigation needed the visibility. All of it is
+routed through `PasskeyMfa\Libraries\DiagnosticLog::write()`, a thin
+wrapper around `log_message()` that only actually writes when
+`ENVIRONMENT === 'development'` - in any other environment (staging,
+production, testing), these calls are silent no-ops.
+
+**The same gating also applies to something arguably more sensitive
+than the log calls themselves:** `PasskeyMfa::verify()` used to append
+a `[diagnostic: ...]` suffix directly to the flash message shown to the
+*end user* on a failed verification, not just to the log - added during
+an earlier investigation into a bug that gave zero visibility any other
+way. That's now gated through the same `ENVIRONMENT === 'development'`
+check (`verificationFailedMessage()`), so production users only ever
+see the plain, generic failure message
+(`lang('PasskeyMfa.verificationFailed')`) - the specific internal
+reason is never shown to them outside a development environment.
+
+If you need this visibility again on a production-like environment,
+the practical option is reproducing the issue with
+`CI_ENVIRONMENT=development` set for that specific session, not turning
+on logging that writes to your real production log (or shows internal
+details to real users) continuously.
+
 ## Tests
 
 **If you're using `shield-mfa-dispatcher`** (or anything else that
@@ -1074,7 +1172,9 @@ tests/PasskeyMfa/
                                                      the regression test for the fixed duplicate-key bug,
                                                      and beginDiscoverableAuthentication()'s own JSON shape
   Authentication/Actions/PasskeyMfaTest.php     <- login action: getType/createIdentity, show() smoke test
-  Authentication/Actions/PasskeyActivatorTest.php <- register action: same, plus skip
+  Authentication/Actions/PasskeyActivatorTest.php <- register action: same, plus skip,
+                                                      plus appliesTo() - the fix for the
+                                                      confirmed register-slot-always-wins bug
   Controllers/PasskeySettingsControllerTest.php <- list/rename/remove only (not enroll/confirm)
   Filters/RequireFreshPasskeyTest.php           <- step-up freshness/enrollment logic
   Controllers/PasskeyStepUpControllerTest.php   <- step-up challenge page (show() smoke test,

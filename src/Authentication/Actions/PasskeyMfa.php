@@ -12,6 +12,7 @@ use CodeIgniter\Shield\Entities\User;
 use CodeIgniter\Shield\Exceptions\RuntimeException;
 use Config\PasskeyMfa as PasskeyMfaConfig;
 use PasskeyMfa\Libraries\CompletesPendingAction;
+use PasskeyMfa\Libraries\DiagnosticLog;
 use PasskeyMfa\Libraries\PasskeyIdentityStore;
 
 /**
@@ -85,22 +86,25 @@ class PasskeyMfa implements ActionInterface
     }
 
     /**
-     * TEMPORARY DIAGNOSTIC added at every step below - a real,
+     * DIAGNOSTIC logging/messaging added at every step below - a real,
      * confirmed gap where a failed verification gave zero visibility
      * into WHERE in the flow it actually failed, and log_message()
      * alone turned out not to be reliably visible either (a real
      * report came back with nothing written to the app's own log at
-     * all). The specific failure reason is now shown directly in the
-     * page's own flash message too - guaranteed visible regardless of
-     * the app's logging configuration, since it's the exact same
-     * mechanism (session('error'), already rendered by
-     * passkey_mfa_verify.php) that's already confirmed working.
+     * all). The specific failure reason is also shown directly in the
+     * page's own flash message - guaranteed visible regardless of the
+     * app's logging configuration, since it's the exact same mechanism
+     * (session('error'), already rendered by passkey_mfa_verify.php)
+     * that's already confirmed working.
      *
-     * REVERT BEFORE LONG-TERM PRODUCTION USE: showing raw internal
-     * failure reasons to end users is not something you'd normally
-     * want permanently (see PasskeyIdentityStore::$lastFailureReason's
-     * own doc comment) - this is deliberately verbose specifically to
-     * get an open bug diagnosed, not a permanent UX choice.
+     * GATED TO DEVELOPMENT ONLY, both the log_message() calls (now
+     * DiagnosticLog::write() - see that class's own doc comment) and
+     * the flash message's own `[diagnostic: ...]` suffix: showing raw
+     * internal failure reasons, including user_id values, isn't
+     * something that should happen in a production environment just
+     * because a past investigation needed the visibility. In anything
+     * other than ENVIRONMENT === 'development', the flash message falls
+     * back to the plain, generic failure text only.
      */
     public function verify(IncomingRequest $request): Response
     {
@@ -108,24 +112,41 @@ class PasskeyMfa implements ActionInterface
         $responseJson = (string) $request->getPost('credential');
 
         if ($responseJson === '') {
-            log_message('error', 'PasskeyMfa verify: credential POST field was empty for user_id {user_id}.', ['user_id' => $user->id]);
+            DiagnosticLog::write('error', 'PasskeyMfa verify: credential POST field was empty for user_id {user_id}.', ['user_id' => $user->id]);
 
-            return redirect()->back()->with('error', lang('PasskeyMfa.verificationFailed') . ' [diagnostic: credential field was empty]');
+            return redirect()->back()->with('error', $this->verificationFailedMessage('credential field was empty'));
         }
 
         if (! $this->store->completeAuthentication($user, $responseJson)) {
             $reason = $this->store->lastFailureReason ?? 'unknown - completeAuthentication() returned false with no reason recorded';
-            log_message('error', 'PasskeyMfa verify: completeAuthentication() returned false for user_id {user_id}: {reason}', ['user_id' => $user->id, 'reason' => $reason]);
+            DiagnosticLog::write('error', 'PasskeyMfa verify: completeAuthentication() returned false for user_id {user_id}: {reason}', ['user_id' => $user->id, 'reason' => $reason]);
 
-            return redirect()->back()->with('error', lang('PasskeyMfa.verificationFailed') . ' [diagnostic: ' . $reason . ']');
+            return redirect()->back()->with('error', $this->verificationFailedMessage($reason));
         }
 
-        log_message('info', 'PasskeyMfa verify: completeAuthentication() succeeded for user_id {user_id}, completing login.', ['user_id' => $user->id]);
+        DiagnosticLog::write('info', 'PasskeyMfa verify: completeAuthentication() succeeded for user_id {user_id}, completing login.', ['user_id' => $user->id]);
 
         $this->completePendingAction($user);
 
         return redirect()->to(config('Auth')->loginRedirect())
             ->with('message', lang('PasskeyMfa.successMessage'));
+    }
+
+    /**
+     * The plain failure message, with a `[diagnostic: ...]` suffix
+     * appended only when ENVIRONMENT is 'development' - see verify()'s
+     * own doc comment for why this isn't shown in any other
+     * environment.
+     */
+    private function verificationFailedMessage(string $reason): string
+    {
+        $message = lang('PasskeyMfa.verificationFailed');
+
+        if (ENVIRONMENT === 'development') {
+            $message .= ' [diagnostic: ' . $reason . ']';
+        }
+
+        return $message;
     }
 
     /**
