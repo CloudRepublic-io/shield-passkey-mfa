@@ -15,8 +15,8 @@
     ],
     "require": {
         "php": "^8.2",
-        "codeigniter4/framework": "^4.3",
-        "codeigniter4/shield": "^1.0",
+        "codeigniter4/framework": "^4.7",
+        "codeigniter4/shield": "^1.4",
         "web-auth/webauthn-lib": "^5.1"
     },
     "autoload": {
