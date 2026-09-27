@@ -142,6 +142,11 @@ final class PasskeyMfaTest extends CIUnitTestCase
 
         /** @var IncomingRequest $request */
         $request = service('request', null, false);
+        // CodeIgniter 4.7+ reads POST from a shared 'superglobals' snapshot
+        // taken the first time anything touches the request, so the
+        // $_POST assignment above is invisible to it - setGlobal() works
+        // on 4.6 and 4.7 alike.
+        $request->setGlobal('post', $post);
 
         return $request;
     }

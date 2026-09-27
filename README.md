@@ -29,6 +29,15 @@ following the exact same pattern as `shield-totp-mfa`'s
 package's job is the actually-new part: the WebAuthn integration
 itself.
 
+## Requirements
+
+- PHP 8.2 or later
+- CodeIgniter 4.6 or later
+- CodeIgniter Shield 1.4 or later
+- `web-auth/webauthn-lib` 5.1 or later (installed automatically by Composer)
+
+Tested on CodeIgniter 4.6 and 4.7, up to PHP 8.5.
+
 ## Read this before anything else: version sensitivity
 
 `web-auth/webauthn-lib` has changed its core setup API significantly
@@ -1185,6 +1194,29 @@ tests/PasskeyMfa/
                                                      config-gating, no-allowCredentials shape,
                                                      graceful verify() failure with no matching credential
 ```
+
+### Fixes from running the suite on CodeIgniter 4.7 / PHP 8.5
+
+- **`Data too long for column 'username'`.** Shield's `users.username`
+  is `VARCHAR(30)`, and `uniqid()` adds 13 characters. The
+  `passkeyactivatortest` and `passkeysettingstest` prefixes went over the
+  limit. They're now `pkactest` and `pksettest`.
+- **Early-auth "unavailable" tests expecting a bare
+  `{"available": false}`.** `PasskeyEarlyAuthController::options()` now
+  also returns `csrfName`/`csrfHash`, the refreshed CSRF token the login
+  page's JavaScript needs for its next POST. The tests predated that
+  change. They now check through a single `assertUnavailableResponse()`
+  helper: the keys must be exactly `available`, `csrfName` and
+  `csrfHash`, with `available` false. That keeps the email-enumeration
+  guarantee these tests exist for, since a missing email, an empty email
+  and a real user with no passkey all produce an identically shaped
+  response.
+- **POST data invisible on CodeIgniter 4.7+.** This is why "returns a
+  challenge for a user with a registered passkey" saw an empty email.
+  From 4.7, a request reads POST data from a shared `superglobals`
+  snapshot, taken the first time anything touches the request. The
+  tests' request helpers now also call `$request->setGlobal('post', $post)`,
+  which works on 4.6 and 4.7.
 
 ### Setup
 

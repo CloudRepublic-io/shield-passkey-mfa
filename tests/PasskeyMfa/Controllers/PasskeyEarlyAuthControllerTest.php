@@ -78,6 +78,11 @@ final class PasskeyEarlyAuthControllerTest extends CIUnitTestCase
 
         /** @var IncomingRequest $request */
         $request = service('request', null, false);
+        // CodeIgniter 4.7+ reads POST from a shared 'superglobals' snapshot
+        // taken the first time anything touches the request, so the
+        // $_POST assignment above is invisible to it - setGlobal() works
+        // on 4.6 and 4.7 alike.
+        $request->setGlobal('post', $post);
 
         $controller = new PasskeyEarlyAuthController();
         $controller->initController($request, service('response'), service('logger'));
@@ -108,18 +113,35 @@ final class PasskeyEarlyAuthControllerTest extends CIUnitTestCase
         $this->assertSame(404, $response->getStatusCode());
     }
 
+    /**
+     * The "unavailable" response is {available: false} plus the refreshed
+     * CSRF token (csrfName/csrfHash) the login page's JavaScript needs
+     * for its next POST - added to the controller after these tests were
+     * written, which is why they used to compare against a bare
+     * ['available' => false]. What matters for email-enumeration safety
+     * is that every "unavailable" case has exactly the same shape, so
+     * all of them are checked through this one assertion.
+     */
+    private function assertUnavailableResponse(array $body): void
+    {
+        $this->assertSame(['available', 'csrfName', 'csrfHash'], array_keys($body));
+        $this->assertFalse($body['available']);
+        $this->assertSame(csrf_token(), $body['csrfName']);
+        $this->assertIsString($body['csrfHash']);
+    }
+
     public function testOptionsReportsUnavailableForANonExistentEmail(): void
     {
         $response = $this->makeController(['email' => 'nobody-' . uniqid() . '@example.com'])->options();
 
-        $this->assertSame(['available' => false], $this->jsonBody($response));
+        $this->assertUnavailableResponse($this->jsonBody($response));
     }
 
     public function testOptionsReportsUnavailableForAnEmptyEmail(): void
     {
         $response = $this->makeController(['email' => ''])->options();
 
-        $this->assertSame(['available' => false], $this->jsonBody($response));
+        $this->assertUnavailableResponse($this->jsonBody($response));
     }
 
     /**
@@ -135,7 +157,7 @@ final class PasskeyEarlyAuthControllerTest extends CIUnitTestCase
 
         $response = $this->makeController(['email' => $user->email])->options();
 
-        $this->assertSame(['available' => false], $this->jsonBody($response));
+        $this->assertUnavailableResponse($this->jsonBody($response));
     }
 
     public function testOptionsReturnsAChallengeForAUserWithARegisteredPasskey(): void
