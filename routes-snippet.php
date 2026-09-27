@@ -20,45 +20,24 @@ $routes->post(
     ['as' => 'passkey-activator-skip']
 );
 
-// OPTIONAL - only needed if Config\PasskeyMfa::$enableEarlyAuthentication
-// is turned on. Deliberately public (NOT wrapped in the 'session' filter,
-// or any full-login-required filter) - these are called from the login
-// page itself, before the visitor is authenticated at all. Both routes
-// return early (404) on their own if the config flag is off, so adding
-// these routes without also flipping that flag is harmless. See
-// "Optional: trigger a passkey prompt from the login form" in the README.
+// OPTIONAL - only needed if Config\PasskeyMfa::$enablePasskeyAutofill or
+// $enableDiscoverableAuthentication is turned on (both use these two
+// routes). Both return 404 on their own while both flags are off, so adding
+// them early is harmless. See "Optional: passkey sign-in on the login page"
+// in the README.
 //
-// Deliberately placed under auth/a/... - Shield's own established
-// convention for its gateway-action routes (auth-action-show/handle/verify),
-// which is ALSO commonly the exact pattern apps already exclude from any
-// global login-required filter (e.g. 'except' => ['auth/a/*'] in
-// app/Config/Filters.php). CONFIRMED, REAL ISSUE: an earlier version of
-// this snippet used auth/passkey/early/... instead, which does NOT match
-// that common exclusion pattern - a global filter silently intercepted
-// both routes for a real app, redirecting them to the login page (a 303)
-// instead of ever reaching this controller at all. If your own app's
-// global filters exclude something OTHER than auth/a/*, these two routes
-// still need to be added to whatever your own exclusion list actually is
-// - check app/Config/Filters.php's $globals before assuming this "just
-// works".
-$routes->post(
-    'auth/a/passkey-early/options',
-    '\PasskeyMfa\Controllers\PasskeyEarlyAuthController::options',
-    ['as' => 'passkey-early-auth-options']
-);
-
-$routes->post(
-    'auth/a/passkey-early/verify',
-    '\PasskeyMfa\Controllers\PasskeyEarlyAuthController::verify',
-    ['as' => 'passkey-early-auth-verify']
-);
-
-// OPTIONAL - only needed if Config\PasskeyMfa::$enableDiscoverableAuthentication
-// is turned on. Same deliberate placement under auth/a/... as the two
-// routes above, for the identical reason - see the comment above these
-// for the full explanation. Also deliberately public/unfiltered: no
-// user is known at all when options() is called, and verify() is what
-// determines who logged in, so neither can require an existing session.
+// Deliberately public (NOT wrapped in the 'session' filter or any
+// login-required filter): they're called from the login page before the
+// visitor is authenticated - no user is known when options() is called,
+// and verify() is what determines who logged in.
+//
+// Deliberately placed under auth/a/... - Shield's own convention for its
+// gateway-action routes, and commonly already excluded from a global
+// login-required filter (e.g. 'except' => ['auth/a/*'] in
+// app/Config/Filters.php). A real app's global filter once intercepted
+// login-page passkey routes placed elsewhere, redirecting them to the
+// login page instead of reaching the controller. If your app excludes
+// something other than auth/a/*, add these two routes to your own list.
 $routes->post(
     'auth/a/passkey-discoverable/options',
     '\PasskeyMfa\Controllers\PasskeyDiscoverableAuthController::options',

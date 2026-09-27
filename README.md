@@ -34,7 +34,9 @@ itself.
 - PHP 8.2 or later
 - CodeIgniter 4.6 or later
 - CodeIgniter Shield 1.4 or later
-- `web-auth/webauthn-lib` 5.1 or later (installed automatically by Composer)
+- `web-auth/webauthn-lib` 5.3 or later (installed automatically by Composer). 5.3 is
+  the first version with `Webauthn\CredentialRecord`, which the synced-passkey counter
+  fix below depends on; on 5.1 or 5.2 the package fails with a fatal error.
 
 Tested on CodeIgniter 4.6 and 4.7, up to PHP 8.5.
 
@@ -50,8 +52,8 @@ against the library's own current documentation, not assumed from
 memory), all isolated into one file: `src/Libraries/WebauthnFactory.php`.
 That file's own doc comment has the full explanation and a checklist -
 read it before relying on this package, especially if
-`composer show web-auth/webauthn-lib` shows something other than a 5.x
-version.
+`composer show web-auth/webauthn-lib` shows something other than 5.3 or
+a later 5.x version (`composer.json` requires `^5.3`).
 
 A mismatch here fails loudly (a PHP `TypeError`), not silently - which
 is the good news. The more important thing this can't protect you from
@@ -82,7 +84,7 @@ of `Config\PasskeyMfa::$rpName` to this entity "fixed" the warning -
 but that assumed the parameter had *already* been widened to accept
 `null` at the same time it was deprecated. It hadn't: a real app
 running this package's own declared, supported constraint
-(`composer.json`: `web-auth/webauthn-lib ^5.1`) hit an immediate fatal
+(`composer.json` then said `web-auth/webauthn-lib ^5.1`; it's now `^5.3`) hit an immediate fatal
 `TypeError` - `Argument #1 ($name) must be of type string, null
 given` - the moment that "fix" shipped. Deprecating a feature and
 changing its type signature are two distinct events that don't
@@ -92,7 +94,7 @@ future version will require."
 
 **This is reverted.** `beginRegistration()` passes the actual string
 value again, which is safe across this package's entire declared
-`^5.1` range regardless of which specific patch version is installed -
+`^5.3` range regardless of which specific patch version is installed -
 a non-null string satisfies both a `string` and a `?string` parameter
 type. The deprecation warning itself is real but harmless (registration
 and login both work correctly either way, on every version in the
@@ -163,9 +165,10 @@ fixed now - see that class's own doc comment for the full account.
 **Resolved - the real cause turned out to be unrelated to multiple
 passkeys, or to `PasskeyIdentityStore`/`PasskeyMfa` at all.** A real
 user's diagnostic session traced this to
-`Config\PasskeyMfa::$enableEarlyAuthentication` (the optional
-login-page-blur feature - see "Optional: trigger a passkey prompt from
-the login form" below) being enabled at the same time. `verify()`
+`Config\PasskeyMfa::$enableEarlyAuthentication` (an optional
+login-page-blur feature that has since been removed and replaced by
+passkey autofill - see "Optional: passkey sign-in on the login page"
+below) being enabled at the same time. `verify()`
 itself was confirmed working correctly via `log_message()` output in
 one test - but a later test on the same setup showed nothing logged at
 all, which turned out to mean something else entirely was intercepting
@@ -188,21 +191,18 @@ form) - meaning this failed with **zero visibility anywhere**: no
 server-side log (the request never reached PHP code that could log
 anything) and no visible client-side error either.
 
-Both `PasskeyEarlyAuthController::options()` and `::verify()` now
+Both `PasskeyEarlyAuthController::options()` and `::verify()` were changed to
 return the current token (`csrf_token()`/`csrf_hash()` - CI4's own
 "always available" functions for exactly this) in their JSON response;
-`passkey-login.js` (this feature's reference JS - see "Optional:
-trigger a passkey prompt from the login form" below; it's now
-combined with the discoverable-login feature's own JS into one file,
-see "A single, combined reference JS file" further down) updates both
+`passkey-login.js` (the login page's reference JS - see "Optional:
+passkey sign-in on the login page" below) updates both
 its own tracked copy and the page's actual hidden CSRF field after
 every response, so its next call - and any fallback to the normal
 password form - always submits with a valid, current token. See
-`PasskeyEarlyAuthController::options()`'s own doc comment, and the
-"CSRF TOKEN HANDLING" section of `passkey-login.js`'s own header
-comment, for the full account.
+the "CSRF TOKEN HANDLING" section of `passkey-login.js`'s own header
+comment for how the current script handles this.
 
-**If you're not using early authentication at all**, this specific bug
+**If you never used that email-blur feature**, this specific bug
 never applied to you, and the original "login failing with multiple
 passkeys" report was most likely this same issue coincidentally
 surfacing on whichever specific setup was being tested at the time,
@@ -287,10 +287,9 @@ user - `account/passkeys` isn't limited to one).
 ```
 src/
   Assets/
-    passkey-login.js                     <- reference JS for BOTH optional login-shortcut
-                                            features below, combined into one file - not
-                                            auto-loaded (see "A single, combined reference
-                                            JS file" further down)
+    passkey-login.js                     <- reference JS for the optional login-page passkey
+                                            sign-in (autofill and/or button) - not auto-loaded
+                                            (see "Optional: passkey sign-in on the login page")
   Authentication/Actions/
     PasskeyMfa.php                       <- 'login' action: verification only
     PasskeyActivator.php                 <- 'register' action: optional setup at signup
@@ -300,8 +299,8 @@ src/
     PasskeyActivatorController.php       <- handles PasskeyActivator's "skip for now" link
     PasskeySettingsController.php        <- self-service add/rename/remove
     PasskeyStepUpController.php          <- step-up challenge page
-    PasskeyEarlyAuthController.php       <- optional login-page-blur passkey prompt endpoints
-    PasskeyDiscoverableAuthController.php <- optional "Login with a passkey" button endpoints
+    PasskeyDiscoverableAuthController.php <- optional login-page passkey sign-in endpoints
+                                             (autofill and the "Login with a passkey" button)
   Database/Migrations/..._CreateAuthPasskeyCredentials.php
   Filters/RequireFreshPasskey.php        <- step-up auth filter for sensitive routes
   Language/en/PasskeyMfa.php
@@ -312,8 +311,8 @@ src/
                                              signature counter check for synced passkeys
     PasskeyIdentityStore.php             <- shared registration/verification orchestration
     CompletesPendingAction.php           <- shared "finish this pending action" trait
-    CompletesEarlyLogin.php              <- shared login-completion trait for the two
-                                             out-of-band passkey login features above
+    CompletesEarlyLogin.php              <- login completion for passkey sign-in on the
+                                             login page (no password involved)
     DiagnosticLog.php                    <- gates all diagnostic log_message() calls in
                                              this package to a development environment only
   Models/PasskeyCredentialModel.php
@@ -409,18 +408,14 @@ replace the relevant block in each view's `<script>` with the classic
 manual conversion pattern (widely documented at
 [webauthn.guide](https://webauthn.guide/)) instead.
 
-`src/Assets/passkey-login.js`'s email-blur feature (Feature 1 in that
-file) additionally relies on `navigator.credentials.get()`'s own
-`signal` option (an `AbortController`/`AbortSignal`, used to cancel an
-in-flight ceremony the moment the visitor moves on to the password
-field) - confirmed via MDN's own documentation and W3C's own
-web-platform-tests as a real, specified, widely-implemented part of
-the Credential Management API (the same mechanism libraries like
-SimpleWebAuthn use for identical reasons). Precise per-browser version
-numbers for this specific option aren't confirmed here the way the
-JSON helpers above are - if you need to support unusually old
-browsers, test this specifically rather than assuming it's covered by
-the same version floor.
+`src/Assets/passkey-login.js`'s passkey autofill relies on
+conditional mediation (`navigator.credentials.get()` with
+`mediation: 'conditional'`), supported by current Chrome, Edge, Safari
+and Firefox. The script checks
+`PublicKeyCredential.isConditionalMediationAvailable()` first and does
+nothing at all where it's unsupported - the login form simply works as
+a normal password form there, and the "Login with a passkey" button
+(if you use it) still works.
 
 ## Enrollment used to require a confusing second click - fixed
 
@@ -657,343 +652,200 @@ directly (the exact same WebAuthn ceremony the login action itself
 uses). See `shield-totp-mfa`'s README for the fuller explanation of why
 step-up auth is deliberately kept out of the Action system entirely.
 
-## Optional: trigger a passkey prompt from the login form
+## Optional: passkey sign-in on the login page
 
-**If you enabled this feature and hit login failures with no visible
-error and nothing in your logs, see "Every synced passkey login used
-to fail verification - fixed" further up for a confirmed CSRF
-token-regeneration bug specific to this feature, now fixed.**
+Two optional ways to let a visitor sign in with a passkey instead of
+their password, both off by default. Turn on either or both:
 
-**If it works with one registered passkey but a real, browser-native
-"there was a problem signing you in with your passkey" error appears
-in Edge (or similar) the moment a second passkey is registered:**
-`PasskeyEarlyAuthController::options()` used to `json_decode()` the
-options and let a separate `setJSON()` call re-encode them - the login-time
-MFA challenge view (`passkey_mfa_verify.php`), using the exact same
-`PasskeyIdentityStore::beginAuthentication()`, embeds the raw JSON
-string directly instead and was already confirmed working correctly
-with multiple credentials. That decode/re-encode round trip is now
-removed - `options()` embeds the raw string the same way, matching the
-already-proven-correct pattern. **Being honest about this one:** the
-exact mechanism by which the round trip altered the data for a
-multi-entry `allowCredentials` list specifically was not isolated -
-this is a confirmed-working fix that matches known-correct behavior
-elsewhere in this package, not a fully root-caused explanation of why
-the round trip broke things. See `PasskeyEarlyAuthController::options()`'s
-own doc comment for the full account.
+- **Passkey autofill** (`$enablePasskeyAutofill`): the browser offers
+  the visitor's passkeys in the email field's own autofill dropdown,
+  next to any saved usernames. Choosing one signs them in; anyone who
+  ignores it types their email and password as usual. **Nothing ever
+  pops up on its own.** To see the experience, try
+  [webauthn.io](https://webauthn.io): register a test passkey, reload
+  the page, and click into the empty username field.
+- **"Login with a passkey" button** (`$enableDiscoverableAuthentication`):
+  clicking it opens the browser's own passkey picker straight away, for
+  visitors who prefer a button or whose browser doesn't support
+  autofill.
 
-**If the ceremony completes successfully in Edge specifically (the
-visitor sees the browser's own success indication) but nothing happens
-afterward - no error visible anywhere, and `verify()` never gets
-called (confirm via your browser's own Network tab: only the
-`options` request fires):** `passkey-login.js`'s email-blur feature
-used to also abort an in-flight ceremony on the password field's own
-`focus` event, not just `input` - suspected (not fully confirmed) to
-have been triggered by Edge's own dialog/focus-management behavior
-around the native passkey prompt, causing `navigator.credentials.get()`
-to reject with an `AbortError` immediately after the visitor completed
-it successfully. `focus` is removed - only `input` (the visitor
-actually typing) and the form's own `submit` event still cancel an
-in-flight ceremony. The script's own diagnostic `console.warn()` call
-is also no longer commented out by default, so if this specific fix
-turns out to be incomplete, the real error name will be visible in the
-browser's own DevTools console on the next report, rather than needing
-another round
-of silent failures to narrow down. See "CANCELLING" in that file's own
-header comment for the full account.
+Both use the same two endpoints and the same reference script
+(`src/Assets/passkey-login.js`), and both need **discoverable**
+passkeys (see below).
 
-Off by default. Several sites (GitHub, Microsoft, and others) trigger
-the browser's native passkey prompt as soon as a returning user tabs
-away from the email field on the login form - before they've typed
-anything into the password field at all. If they have a passkey
-registered, they can complete the whole login right there; if not,
-nothing happens and they just continue typing their password normally.
+### Requires discoverable ("resident key") passkeys
+
+The browser has to find the visitor's passkey without being told who
+they are, so a passkey only appears in the autofill list or the picker
+if it was registered as a client-side discoverable credential (older
+WebAuthn terminology: a "resident key"). A non-discoverable credential
+still works for this package's MFA step, where the server already
+knows who is logging in and supplies `allowCredentials`, but it won't
+be offered here. Passkeys saved to a platform or password manager
+(Windows Hello, iCloud Keychain, Google Password Manager, 1Password,
+...) are discoverable.
+
+`Config\PasskeyMfa::$residentKeyRequirement` (default `'preferred'`)
+controls what **new** registrations request from the authenticator.
+`web-auth/webauthn-lib`'s own default when this is omitted (which is
+what earlier versions of this package did) is also equivalent to
+`'preferred'`, so already-registered passkeys may or may not be
+discoverable, depending on what the authenticator chose at the time.
+This package can't detect that after the fact: if a user's existing
+passkey isn't offered, re-registering it (`account/passkeys`) is the
+fix.
+
+`'required'` guarantees future registrations are discoverable, at a
+cost: registration fails outright on an authenticator that can't create
+one. Passkey managers always can, but older, non-passkey-aware security
+keys may not. `'preferred'` asks for a discoverable credential without
+insisting on one.
 
 ### How it works
 
-Two new AJAX (JSON) endpoints, deliberately separate from the login
-Action (`PasskeyMfa`) and step-up (`PasskeyStepUpController`) machinery
-- the visitor calling these isn't logged in, or even mid-login,
-at all, so neither Shield's pending-login state nor an authenticated
-session is involved:
+Two AJAX (JSON) endpoints (`PasskeyDiscoverableAuthController`),
+separate from the login Action (`PasskeyMfa`) and step-up machinery -
+the visitor calling them isn't logged in, or even mid-login:
 
-- **`POST auth/a/passkey-early/options`** - given an email, returns
-  WebAuthn request options if that email has a registered passkey.
-  Returns the same `{"available": false}` response whether the email
-  doesn't exist at all, or exists but has no passkey - the two cases
-  are indistinguishable from the outside, so this can't be used to
-  enumerate registered emails.
-- **`POST auth/a/passkey-early/verify`** - given the browser's WebAuthn
-  response, verifies it against the exact identity the matching
-  `options` call issued a challenge for (session-pinned server-side,
-  not trusted from anything the client sends at verify time), and logs
-  the user in on success.
+- **`POST auth/a/passkey-discoverable/options`** - takes no email or
+  username. Always returns a fresh challenge while either option is on;
+  the browser decides whether the visitor has a usable passkey. Because
+  it reveals nothing about accounts, it can't be used to probe which
+  emails are registered.
+- **`POST auth/a/passkey-discoverable/verify`** - given the browser's
+  WebAuthn response, identifies and verifies the user in one step
+  (`PasskeyIdentityStore::completeDiscoverableAuthentication()`), then
+  logs them in.
 
-Both reuse `PasskeyIdentityStore::beginAuthentication()`/`completeAuthentication()`
-directly - the identical WebAuthn ceremony every other flow in this
-package already uses, just invoked against a user looked up by email
-rather than one Shield has already put in a pending or logged-in
-state.
+Both return 404 while both options are off.
 
-Deliberately placed under `auth/a/...` - Shield's own established
-convention for its gateway-action routes
-(`auth-action-show`/`handle`/`verify`), and also commonly the exact
-pattern apps already exclude from any global login-required filter.
-See the setup steps below - this matters more than it might look like
-it should.
+For autofill, `passkey-login.js` requests options as the page loads and
+calls `navigator.credentials.get()` with `mediation: 'conditional'`.
+That request waits silently until the visitor picks a passkey from the
+dropdown. Submitting the password form cancels it, and clicking the
+button cancels it first (a browser allows only one passkey request at a
+time), then restarts it if the visitor stays on the page.
+
+CodeIgniter replaces the CSRF token after every checked POST
+(`Config\Security::$regenerate`, `true` by default), so each response
+from these endpoints carries the new token and the script writes it
+into the page's hidden CSRF field. If the visitor submits the password
+form before the page-load options request has returned (whose token
+it has already used up), the submission is held until the fresh token
+is in the form - at most 10 seconds - then sent.
+
+### The security design behind identifying the user, worth being explicit about
+
+The assertion response's own `userHandle` field is what many WebAuthn
+tutorials read directly to answer "who logged in" - this package
+deliberately does not. `completeDiscoverableAuthentication()` looks up
+the *credential* by its ID first
+(`PasskeyCredentialModel::findByCredentialId()`, a trusted server-side
+lookup populated only at registration time), derives a *candidate* user
+from that row's `user_id`, and only then runs the cryptographic
+signature check (`assertionValidator()->check()`) against that
+candidate. If the check fails, the candidate is never trusted, whatever
+the response's `userHandle` claimed.
 
 ### Setup
 
-1. Set `$enableEarlyAuthentication = true` in `app/Config/PasskeyMfa.php`.
+1. In `app/Config/PasskeyMfa.php`, set `$enablePasskeyAutofill = true`,
+   `$enableDiscoverableAuthentication = true`, or both. Decide your
+   `$residentKeyRequirement` (see above).
 
-2. Add the two routes from `routes-snippet.php` (already included if
-   you copied the whole snippet earlier - they return 404 on their own
-   if the config flag above is off, so having them present is harmless
-   either way).
+2. Add the two `passkey-discoverable` routes from `routes-snippet.php`.
 
 3. **Check `app/Config/Filters.php`'s `$globals` for a login-required
-   filter** (commonly named `session` or `isLoggedIn`) applied to
-   every request. **Confirmed, real issue against a real app:** if such
-   a filter is global, its own `'except'` list needs to cover these two
-   routes too, or the filter silently redirects them to your login page
-   before this controller is ever reached - `fetch()` follows that
-   redirect and receives HTML back where JSON was expected, which looks
-   like the feature doing nothing at all (no error, no prompt, nothing
-   in the console). Placing the routes under `auth/a/...` already
-   matches what many Shield apps exclude for Shield's own gateway
-   routes - for example:
+   filter** (commonly `session` or `isLoggedIn`) applied to every
+   request. If there is one, its `'except'` list must cover these two
+   routes, or the filter redirects them to your login page and the
+   script receives HTML where it expected JSON - which looks like
+   nothing happening at all. The routes live under `auth/a/...`, which
+   many Shield apps already exclude, for example:
 
    ```php
    'session' => ['except' => ['login*', 'register', 'auth/a/*', 'logout']],
    ```
 
-   If your own app excludes something else, or doesn't exclude
-   `auth/a/*` specifically, add these two routes to whatever your
-   actual exclusion list is instead.
+4. On your login page:
+   - **For autofill:** nothing to add. The script adds the `webauthn`
+     token to the email field's `autocomplete` attribute if it's missing
+     (Shield's default `autocomplete="email"` becomes
+     `email webauthn`). You can put it in your markup yourself instead.
+   - **For the button:** add e.g. `<button type="button"
+     id="passkey-discoverable-login">Login with a passkey</button>`,
+     optionally with a status element
+     (`<div id="passkey-discoverable-status"></div>`).
 
-4. Copy `src/Assets/passkey-login.js` into your own login page's
-   JavaScript (or adapt the logic inline) - this is a reference
-   implementation, not something this package loads automatically
-   anywhere. It also contains the separate "Login with a passkey"
-   button feature (see "Optional: 'Login with a passkey' button"
-   below) - copying this one file covers both, in either combination.
-   Adjust the settings called out in "FEATURE 1 DETAIL" in that file's
-   own header comment to match your actual login form: the email
-   field's selector, the password field's selector (used to know when
-   to cancel an in-flight passkey prompt - see "CANCELLING" in that
-   same comment), the shared CSRF token field name
-   (`Config\Security::$tokenName` - CodeIgniter's default is
-   `csrf_test_name`), and the route paths if you changed the route
-   names from the defaults.
+5. Copy `src/Assets/passkey-login.js` into your login page (it isn't
+   loaded automatically, and updating the package doesn't update your
+   copy). Adjust the settings at the top of the file if your markup or
+   routes differ: the CSRF field name (`Config\Security::$tokenName`,
+   default `csrf_test_name`), the email field and button selectors, and
+   the two route paths.
 
-5. Test it in a real browser with a real passkey already registered -
-   same caveat as everywhere else in this README: "the code looks
-   right" is meaningfully less reassuring for anything WebAuthn-shaped
-   than for ordinary application code.
+6. Test it in a real browser with a real, discoverable passkey
+   registered. If the button's picker opens but offers nothing, or the
+   autofill list shows no passkey, that's most likely the
+   discoverability prerequisite above.
 
 ### Does this bypass your app's own MFA?
 
 `Config\PasskeyMfa::$earlyAuthenticationIsSufficient` (default `true`)
-decides this. A passkey is already a strong, phishing-resistant
-credential that's inherently multi-factor (possession of the device +
-its own biometric/PIN unlock), verified directly by this app rather
-than delegated to a third party - unlike `shield-oauth-login`'s
-equivalent toggle (`$triggerMfaAfterSso`, which defaults to **still**
-requiring MFA, since an external IdP's own security posture isn't
-something this app can verify), treating an early passkey login as
-sufficient on its own is a more defensible default here. Set it to
-`false` if you'd rather layer your app's own MFA (e.g.
-`shield-mfa-dispatcher`) on top regardless - a user who authenticates
-this way is then sent to the normal MFA challenge page instead of
-straight to your app's post-login destination.
+decides this, for both options. A passkey is already a strong,
+phishing-resistant credential that's inherently multi-factor
+(possession of the device plus its own biometric/PIN unlock), verified
+directly by this app rather than delegated to a third party - unlike
+`shield-oauth-login`'s equivalent toggle (`$triggerMfaAfterSso`, which
+defaults to **still** requiring MFA), treating it as sufficient on its
+own is the more defensible default here. Set it to `false` to layer
+your app's own MFA (e.g. `shield-mfa-dispatcher`) on top: a user who
+signs in this way is then sent to the normal MFA challenge page.
 
 ### The reflection-based login completion, and why it's needed here too
 
 When `$earlyAuthenticationIsSufficient` is `false`,
-`CompletesEarlyLogin::completeEarlyLogin()` (a trait shared with
-`PasskeyDiscoverableAuthController` - see "Optional: 'Login with a
-passkey' button" below) uses the identical reflection-based mechanism
-`shield-oauth-login`'s own `OAuthLoginController::completeLogin()`
-needed, for the identical underlying reason: Shield's own
-`Session::attempt()` is the only path that correctly triggers its
-**private** `setAuthAction()` pending-check - and `attempt()` requires
-a password to check, which a visitor at this point in the flow doesn't
-have (they haven't submitted the login form at all yet). There is no
-public Shield API for "log this already-verified user in, but still
-check whether MFA should apply first." See that method's own doc
-comment, and `shield-oauth-login`'s README, for the fuller account of
-why this approach was needed rather than a cleaner alternative.
-
-## Optional: "Login with a passkey" button (no email needed)
-
-A second, distinct way to let a passkey skip the password form
-entirely - a genuinely different shape from "Optional: trigger a
-passkey prompt from the login form" above, not a variation of it. That
-feature still needs the visitor's email first, to look up which
-credentials to offer. This one needs nothing at all: a plain button
-that, when clicked, lets the browser's own passkey picker show
-whichever credentials it has for your site - across every account, not
-just one the server already has in mind - and the server figures out
-who logged in from whichever one gets chosen. This is the
-"discoverable" or "usernameless" WebAuthn flow, and it's what most
-sites actually mean when they show a standalone "Login with a passkey"
-button separate from the email field.
-
-Off by default, same as the email-blur feature - `Config\PasskeyMfa::$enableDiscoverableAuthentication`.
-
-### Requires discoverable ("resident key") credentials
-
-This is the one prerequisite that genuinely gates this feature, and
-it's worth understanding before turning it on. A passkey only shows up
-in the browser's own picker for a usernameless request if it was
-registered as a client-side discoverable credential (older WebAuthn
-terminology: a "resident key") in the first place - a non-discoverable
-credential can still be used when the server already knows who's
-logging in and supplies `allowCredentials` (exactly what
-`PasskeyMfa`/`PasskeyEarlyAuthController` both already do), but it
-simply won't appear in a picker shown with no `allowCredentials` at
-all.
-
-`Config\PasskeyMfa::$residentKeyRequirement` (default `'preferred'`)
-controls what **new** registrations request from the authenticator via
-`beginRegistration()`'s own `authenticatorSelection`. Confirmed via
-`web-auth/webauthn-lib`'s own official documentation
-(`webauthn-doc.spomky-labs.com/pure-php/advanced-behaviours/authentication-without-username`):
-the library's own default, when this parameter is omitted entirely
-(which is what earlier versions of this package's own
-`beginRegistration()` did, before this feature existed), is already
-equivalent to `'preferred'` - meaning **already-registered passkeys may
-already be discoverable**, with no guarantee either way, since it
-depended entirely on what the specific authenticator chose to do at
-the time. There is no way for this package to detect, after the fact,
-whether an already-stored credential is discoverable or not - if a
-user's existing passkey doesn't show up in this feature's own picker,
-the practical fix is re-registering it (`account/passkeys`), not
-something this package can resolve automatically.
-
-`'required'` guarantees future registrations are discoverable, at a
-real cost: registration itself fails outright on any authenticator that
-cannot create one at all. True passkey managers (Chrome/Edge/Safari's
-own built-in ones, which is what this whole package is built around)
-always can - but if this package is ever used alongside older,
-non-passkey-aware security keys, `'required'` would block their
-registration entirely. `'preferred'` (the default) asks for a
-discoverable credential without hard-requiring one.
-
-### How it works
-
-Two new AJAX (JSON) endpoints (`PasskeyDiscoverableAuthController`),
-architecturally close to `PasskeyEarlyAuthController`'s own two, and
-reusing the same `CompletesEarlyLogin` trait for the login-completion
-step both need:
-
-- **`POST auth/a/passkey-discoverable/options`** - no email or
-  username parameter at all. Always returns a fresh challenge when the
-  feature is enabled; there's no `available: false` case the way the
-  email-based feature has, since no candidate user exists yet to check
-  enrollment against - the browser's own picker is what determines
-  whether the visitor has anything usable.
-- **`POST auth/a/passkey-discoverable/verify`** - given the browser's
-  WebAuthn response, identifies and verifies the user in one step
-  (`PasskeyIdentityStore::completeDiscoverableAuthentication()`), then
-  logs them in exactly like the email-based feature does.
-
-### The security design behind identifying the user, worth being explicit about
-
-The assertion response's own `userHandle` field is available and is
-what many WebAuthn tutorials read directly to answer "who logged in" -
-this package deliberately does not do that. Instead,
-`completeDiscoverableAuthentication()` looks up the *credential* by its
-ID first (`PasskeyCredentialModel::findByCredentialId()` - the exact
-same trusted, server-side lookup `completeAuthentication()` already
-relies on, populated only at registration time under this app's own
-control), derives a *candidate* user from that row's own `user_id`, and
-only *afterward* runs the actual cryptographic signature check
-(`assertionValidator()->check()`) against that specific candidate. If
-that check fails, the candidate is never trusted or returned, no matter
-what the response's own `userHandle` claimed. Deriving identity from
-data this server already controls, then confirming it cryptographically,
-is a stronger design than trusting a client-supplied field ahead of any
-check at all - see `completeDiscoverableAuthentication()`'s own doc
+`CompletesEarlyLogin::completeEarlyLogin()` uses the same
+reflection-based mechanism `shield-oauth-login`'s
+`OAuthLoginController::completeLogin()` needed, for the same reason:
+Shield's own `Session::attempt()` is the only path that triggers its
+**private** `setAuthAction()` pending-check, and `attempt()` requires a
+password, which a visitor signing in with a passkey hasn't given. There
+is no public Shield API for "log this already-verified user in, but
+still check whether MFA should apply first." See that method's own doc
 comment for the fuller account.
 
-### Setup
+### Why autofill replaced the "prompt when the email field loses focus" feature
 
-1. Decide your `Config\PasskeyMfa::$residentKeyRequirement` (see above),
-   and set `$enableDiscoverableAuthentication = true`.
-2. Add the two routes from `routes-snippet.php` (already included if
-   you copied the whole snippet earlier - they return 404 on their own
-   if the config flag above is off).
-3. Add a button to your login page (e.g. `<button type="button"
-   id="passkey-discoverable-login">Login with a passkey</button>`,
-   optionally with a status element alongside it), then copy
-   `src/Assets/passkey-login.js` into your own login page's
-   JavaScript - a reference implementation, not something this package
-   loads automatically anywhere. If you're also using "trigger a
-   passkey prompt from the login form" above, this is the SAME file -
-   you only need to copy it once; both features live in it together
-   (see "A single, combined reference JS file" below). Adjust the
-   settings called out in "FEATURE 2 DETAIL" in that file's own header
-   comment: the button/status selectors, the shared CSRF token field
-   name, and the route paths if you changed them from the defaults.
-4. Test it in a real browser with a real, discoverable passkey already
-   registered - same standing caveat as everywhere else in this
-   README: "the code looks right" is meaningfully less reassuring for
-   anything WebAuthn-shaped than for ordinary application code. If the
-   picker appears but shows nothing, that's most likely the
-   discoverability prerequisite above, not a bug in the script.
+Earlier versions had a different login-page option,
+`$enableEarlyAuthentication`: when the visitor left the email field,
+the page looked up whether that email had a passkey and, if so, opened
+the passkey prompt straight away. It was removed because a page that
+starts prompts on its own races the visitor's own actions:
 
-## A single, combined reference JS file
+- **A leftover prompt on the next page.** If the visitor clicked the
+  normal login button just as the prompt was starting, it could still
+  appear after the browser had moved on - on Windows, where the prompt
+  is Windows Hello's own dialog, even after the page had cancelled the
+  request. Page JavaScript can't control that.
+- **Failed logins.** Pressing the mouse on the login button takes focus
+  off the email field before the click submits, so the lookup and the
+  login were sent at the same moment. The lookup used up the page's
+  CSRF token (CodeIgniter replaces it after every checked POST), so the
+  login could be rejected with "The action you requested is not
+  allowed."
 
-`src/Assets/passkey-login.js` contains **both** login-shortcut features
-described above, combined into one file - copy it once, and either or
-both features activate depending on which elements your login page
-actually has (an email field for Feature 1, a button for Feature 2,
-or both). This wasn't just for convenience - it fixed a real,
-confirmed bug that existed specifically because the two features used
-to ship as separate files.
+Autofill never prompts on its own, so neither can happen. It also
+needs no email lookup endpoint.
 
-**The bug, if you're using (or upgrading from) an older version of
-this package that shipped `passkey-early-auth.js` and
-`passkey-discoverable-auth.js` as two separate files:** using both
-features together on the same login page, the two independently-
-designed scripts could start two competing WebAuthn ceremonies at
-once - clicking the "Login with a passkey" button while the email
-field still had a value in it (typed, or left over from a previous
-attempt) could cause the *other* feature's own blur-triggered ceremony
-to also fire, if focus happened to pass through the email field along
-the way.
+**Upgrading from a version with `$enableEarlyAuthentication`:**
 
-**What this looked like in practice:** the first attempt worked
-correctly; cancelling it and trying again produced a visibly different,
-inconsistent browser prompt, and server-side logs showed
-`PasskeyMfa completeAuthentication` (the *known-user*, email-based
-method) being called even though the visitor only ever clicked the
-discoverable button - each script's own ceremony has a correctly
-separate, independently-scoped session key, so neither had any way of
-knowing the other one was *also* mid-ceremony, and whichever response
-actually came back from the browser ended up checked against the wrong
-one's stored challenge, producing `AuthenticatorResponseVerificationException: Invalid challenge`.
-
-**Fixed by combining both features into this one file.** An earlier,
-two-file version fixed this with a shared global flag
-(`window.__passkeyMfaCeremonyInProgress`) both scripts checked before
-starting a ceremony - this consolidated version does the identical
-coordination more directly, via one local `ceremonyInProgress` variable
-both features share naturally, since they now live in the same scope
-rather than needing a global to communicate across separate files.
-Functionally equivalent outcome, cleaner mechanism. If you only enable
-one of the two features, this coordination is inert and has no effect
-either way - you do not need both an email field and a button on the
-same page for this file to work correctly with just one of them
-present.
-
-If you're upgrading from the two-file version: delete
-`passkey-early-auth.js` and `passkey-discoverable-auth.js` from
-wherever you copied them into your own app, and replace both with this
-one file instead - the route paths, config settings, and server-side
-controllers are all unchanged, only the client-side script itself
-was consolidated.
+1. Replace it with `$enablePasskeyAutofill = true` in
+   `app/Config/PasskeyMfa.php`.
+2. Remove the two `passkey-early` routes (`auth/a/passkey-early/options`
+   and `/verify`) from `app/Config/Routes.php`, and add the two
+   `passkey-discoverable` routes if you don't have them yet.
+3. Replace your copy of `passkey-login.js` with the new one.
 
 ## A stuck browser ceremony can block every passkey operation on the device
 
@@ -1022,10 +874,13 @@ and a straightforward rejection look identical from a website's own
 JavaScript), not a bug in this package, and not something a website's
 own code can bypass or speed up.
 
-**Mitigated, not fixed:** both features in `passkey-login.js` now
-impose their own 20-second client-side timeout (via `AbortController`),
-so at least the page itself gives up and re-enables its own UI with a
-clear message well before the browser's own much longer timeout would.
+**Mitigated, not fixed:** the "Login with a passkey" button in
+`passkey-login.js` imposes its own 20-second client-side timeout (via
+`AbortController`), so at least the page gives up and re-enables its
+own UI with a clear message well before the browser's own much longer
+timeout would. Passkey autofill has no timeout by design - it waits,
+invisibly, until the visitor picks a passkey - and the login form stays
+usable with a password throughout.
 This does **not** prevent the underlying browser-level lock on other
 ceremonies during that window - only the browser itself controls that
 - but it does mean your own login page stops looking silently stuck
@@ -1033,38 +888,10 @@ after 20 seconds instead of up to two minutes, and gives the visitor an
 honest "that took too long, please try again" message rather than
 nothing at all.
 
-## A leftover prompt appearing on the next page - fixed
+## Why the button and autofill can offer the "wrong" identity
 
-**Fixed in the current version.** A real report showed the browser's
-native passkey prompt appearing on the 2FA challenge page - after a
-normal email+password login had already been submitted and navigated
-away from the login page entirely. Most likely to happen when both
-fields arrive via autofill and the visitor clicks "login" immediately,
-without ever tabbing through the fields manually (the trigger for
-either login-shortcut feature).
-
-**The mechanism:** if the normal login form gets submitted while either
-feature's own `options()` request is still in flight, that feature's
-`AbortController` doesn't exist yet - there's nothing to call `.abort()`
-on, so the existing abort-on-submit handling silently did nothing. The
-still-running async code then went on to call
-`navigator.credentials.get()` *after* the browser had already begun
-navigating to the next page. Since the browser's own native dialog is
-chrome-level UI, not part of the page's own DOM, it could still render
-even once the new page had loaded - appearing as a confusing,
-unexpected extra prompt on the 2FA challenge page.
-
-**Fixed** via a shared flag, checked independently of whether either
-feature's own `AbortController` happens to exist yet, at every point a
-native prompt could otherwise be triggered - not just relying on the
-abort mechanism working, which depended on timing that autofill could
-easily race past. See `formSubmitted`'s own declaration in
-`passkey-login.js`'s shared state section for the full account.
-
-## Why the button can offer the "wrong" identity, and the email-based feature can't
-
-Worth understanding as a genuine, structural trade-off between the two
-login-shortcut features, not a bug in either one.
+Worth understanding as a genuine, structural property of usernameless
+passkey sign-in, not a bug.
 
 **This was never a security risk, confirmed via multiple independent
 sources on how WebAuthn's own `rpId` restriction works:** it's enforced
@@ -1073,7 +900,7 @@ browser UI convention - a credential genuinely registered for a
 different site cannot be signed for yours, even if a user is
 deliberately tricked into trying (this is the same property that makes
 passkeys phishing-resistant in the first place). So picking an
-unexpected identity from the button's picker was never able to log
+unexpected identity from the picker or autofill list was never able to log
 anyone into the wrong account or leak anything - at worst it fails, as
 covered above.
 
@@ -1088,26 +915,15 @@ browser attempt to find a matching credential in that other profile,
 which is what leads to the stuck ceremony covered above when no match
 exists there.
 
-**Why the email-based feature (`$enableEarlyAuthentication`) doesn't
-have this problem at all:** it already knows the account before
-asking, so it specifies `allowCredentials` - a list of the exact
-credential IDs acceptable for this request. With `allowCredentials`
-specified, the browser has nothing else to offer at all; there is no
-"choose a different account" option for it to show, structurally,
-because the request itself only ever asked about specific,
-named credentials. This is a genuine capability the discoverable
-button cannot have, precisely because not needing to know the account
-up front is the entire point of it.
-
-**The practical trade-off, not a fix:** the discoverable button is the
-more convenient option (no email needed at all), at the cost of this
-small, real risk if a visitor has multiple accounts/profiles on the
-same device. The email-based feature is the safer option in this
-specific regard, at the cost of needing the email first. Consider
-offering the button as a convenience layered on top of the email-based
-flow, rather than as a full replacement for it, and let the 20-second
-timeout above serve as the safety net for the case where someone does
-pick the wrong identity.
+**Why this can't be avoided without knowing the account first:** a
+request that already knows who is logging in can list the exact
+acceptable credentials (`allowCredentials`), leaving the browser
+nothing else to offer - which is how this package's MFA step works,
+and how the removed email-blur feature worked. Both usernameless
+options deliberately don't know the account up front; that's what lets
+a visitor sign in without typing anything. The button's 20-second
+timeout above is the safety net if someone does pick the wrong
+identity.
 
 ## Diagnostic logging is gated to development only
 
@@ -1188,10 +1004,9 @@ tests/PasskeyMfa/
   Filters/RequireFreshPasskeyTest.php           <- step-up freshness/enrollment logic
   Controllers/PasskeyStepUpControllerTest.php   <- step-up challenge page (show() smoke test,
                                                     graceful verify() failure - not the crypto success path)
-  Controllers/PasskeyEarlyAuthControllerTest.php <- login-page-blur endpoints: config-gating,
-                                                     email-enumeration safety, graceful verify() failure
-  Controllers/PasskeyDiscoverableAuthControllerTest.php <- "Login with a passkey" button endpoints:
-                                                     config-gating, no-allowCredentials shape,
+  Controllers/PasskeyDiscoverableAuthControllerTest.php <- login-page passkey sign-in endpoints:
+                                                     enabled by either option (autofill or button),
+                                                     404 when both are off, no-allowCredentials shape,
                                                      graceful verify() failure with no matching credential
 ```
 
@@ -1202,18 +1017,16 @@ tests/PasskeyMfa/
   `passkeyactivatortest` and `passkeysettingstest` prefixes went over the
   limit. They're now `pkactest` and `pksettest`.
 - **Early-auth "unavailable" tests expecting a bare
-  `{"available": false}`.** `PasskeyEarlyAuthController::options()` now
-  also returns `csrfName`/`csrfHash`, the refreshed CSRF token the login
-  page's JavaScript needs for its next POST. The tests predated that
-  change. They now check through a single `assertUnavailableResponse()`
-  helper: the keys must be exactly `available`, `csrfName` and
-  `csrfHash`, with `available` false. That keeps the email-enumeration
-  guarantee these tests exist for, since a missing email, an empty email
-  and a real user with no passkey all produce an identically shaped
-  response.
-- **POST data invisible on CodeIgniter 4.7+.** This is why "returns a
-  challenge for a user with a registered passkey" saw an empty email.
-  From 4.7, a request reads POST data from a shared `superglobals`
+  `{"available": false}`.** These tests went with the email-blur
+  endpoints, which have since been removed along with
+  `PasskeyEarlyAuthControllerTest` (see "Why autofill replaced the
+  'prompt when the email field loses focus' feature").
+- **A 404 leaking between controller tests.** The discoverable-login
+  controller tests shared one response object, so a status an earlier
+  test set (404) was still there for the next one, and `options()`
+  never sets 200 explicitly. Each test controller now gets a fresh
+  response, as a real request does.
+- **POST data invisible on CodeIgniter 4.7+.** From 4.7, a request reads POST data from a shared `superglobals`
   snapshot, taken the first time anything touches the request. The
   tests' request helpers now also call `$request->setGlobal('post', $post)`,
   which works on 4.6 and 4.7.

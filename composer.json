@@ -29,7 +29,7 @@
         "php": "^8.2",
         "codeigniter4/framework": "^4.6",
         "codeigniter4/shield": "^1.4",
-        "web-auth/webauthn-lib": "^5.1"
+        "web-auth/webauthn-lib": "^5.3"
     },
     "autoload": {
         "psr-4": {

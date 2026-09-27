@@ -1,192 +1,124 @@
 /**
- * Reference implementation of BOTH optional passkey-login shortcuts
- * this package supports, combined into a single file so a developer
- * only needs to include one script rather than two. This file is NOT
- * loaded automatically by this package anywhere - copy it into your
- * own login page's JavaScript (or adapt the logic inline), and adjust
- * the selectors/CSRF handling to match your actual login form's
- * markup.
+ * passkey-login.js - reference implementation of the two optional passkey
+ * shortcuts this package supports on your LOGIN page. It is NOT loaded
+ * automatically anywhere: copy it into your login page (or adapt it
+ * inline) and adjust the settings at the top of the code to match your
+ * login form's markup and routes.
  *
- * Each feature below is independent and optional - if your login page
- * only has the elements one of them needs, only that one activates;
- * the other's own setup silently does nothing. You do not need both
- * features enabled to use this file; a page with only an email field,
- * or only a "Login with a passkey" button, works exactly like it would
- * with only that feature's own standalone script.
+ * FEATURE 1 - PASSKEY AUTOFILL (Config\PasskeyMfa::$enablePasskeyAutofill).
+ *   The browser offers the visitor's passkeys in the email field's own
+ *   autofill dropdown, next to any saved usernames - the "conditional UI"
+ *   / "conditional mediation" flow described at
+ *   https://developer.chrome.com/docs/identity/webauthn-conditional-ui and
+ *   used by webauthn.io. Picking a passkey there signs the visitor in; a
+ *   visitor who ignores it just types their email and password as usual.
+ *   NOTHING POPS UP ON ITS OWN: the request sits quietly in the background
+ *   until the visitor chooses a passkey from the dropdown, so it can never
+ *   race a click on the normal login button or leave a prompt on the next
+ *   page. (This replaces an earlier "prompt when the email field loses
+ *   focus" feature, which could do both - see the README.)
  *
- * FEATURE 1 - "trigger a passkey prompt when the user tabs away from
- * the email field" (requires Config\PasskeyMfa::$enableEarlyAuthentication):
- * the pattern GitHub, Microsoft, and others use on their own login
- * pages. The visitor types their email, tabs to the password field (or
- * clicks elsewhere), and if that email has a registered passkey, the
- * browser's native prompt appears immediately - never typing a
- * password at all. See "FEATURE 1 DETAIL" further down for the full
- * step-by-step and this feature's own confirmed bug history.
+ * FEATURE 2 - "LOGIN WITH A PASSKEY" BUTTON
+ *   (Config\PasskeyMfa::$enableDiscoverableAuthentication).
+ *   Clicking the button opens the browser's own passkey picker straight
+ *   away, for visitors who prefer a button or whose browser doesn't
+ *   support autofill.
  *
- * FEATURE 2 - a standalone "Login with a passkey" button (requires
- * Config\PasskeyMfa::$enableDiscoverableAuthentication): no email or
- * username needed at all. The visitor clicks the button, the browser's
- * own passkey picker shows whichever discoverable credentials it has
- * for this site across every account, and the server identifies who
- * logged in from whichever one gets chosen. See "FEATURE 2 DETAIL"
- * further down for the full step-by-step, including the discoverable-
- * credential prerequisite this one specifically depends on.
+ * Both features use the same two endpoints (routes-snippet.php:
+ * passkey-discoverable-auth-options / -verify) and both need DISCOVERABLE
+ * passkeys - the browser has to find the visitor's passkey without being
+ * told who they are. Passkeys saved to a platform or password manager
+ * (Windows Hello, iCloud Keychain, Google Password Manager, 1Password,
+ * ...) are discoverable; see Config\PasskeyMfa::$residentKeyRequirement
+ * for what this package asks for at registration.
  *
- * WHY THESE TWO WERE COMBINED INTO ONE FILE - CONFIRMED, REAL BUG THIS
- * FIXES: when both features were shipped as separate files, a real
- * report showed them able to start two independent, competing WebAuthn
- * ceremonies at once - clicking the button while the email field still
- * had a value in it could cause the other feature's own blur-triggered
- * ceremony to also fire, if focus passed through the email field along
- * the way. Two overlapping navigator.credentials.get() calls produced
- * a confusing, inconsistent browser prompt on a second attempt, and
- * whichever response actually came back got checked against the WRONG
- * flow's own stored challenge server-side, producing a hard-to-
- * diagnose "Invalid challenge" error. The earlier, two-file version
- * fixed this with a shared global flag
- * (window.__passkeyMfaCeremonyInProgress) both scripts checked - this
- * consolidated version does the same coordination more directly, via
- * one local variable (`ceremonyInProgress` below) both features share
- * naturally, since they now live in the same scope. If you only enable
- * one of the two features, this coordination is inert and has no
- * effect either way.
+ * ONE CEREMONY AT A TIME: a browser allows only one passkey request in
+ * flight. Clicking the button cancels the background autofill request
+ * first, and restarts it afterwards if the visitor is still on the page.
  *
- * A LEFTOVER PROMPT CAN APPEAR ON THE NEXT PAGE - CONFIRMED, REAL BUG
- * FIXED HERE: a real report showed the browser's native passkey prompt
- * appearing on the 2FA challenge page - after a normal email+password
- * login had already been submitted and navigated away from the login
- * page entirely (most likely to happen when both fields arrive via
- * autofill and the visitor clicks "login" immediately, without ever
- * tabbing through the fields manually - the trigger for either feature
- * below). If the normal login form gets submitted WHILE either
- * feature's own options() fetch is still in flight, that feature's own
- * AbortController does not exist yet - aborting has nothing to call
- * .abort() on, so it silently does nothing - and the still-running
- * async function goes on to call navigator.credentials.get() AFTER the
- * browser has already begun navigating to the next page. Since the
- * browser's own native dialog is chrome-level UI, not part of the
- * page's own DOM, it can still render even once the new page has
- * loaded - appearing as a confusing, unexpected extra prompt there.
- * Fixed via a shared `formSubmitted` flag, checked independently of
- * whether either feature's own AbortController happens to exist yet at
- * every point a native prompt could otherwise be triggered - see that
- * variable's own declaration (shared state, top of this file) for the
- * full detail.
+ * CSRF TOKEN HANDLING: CodeIgniter replaces the CSRF token after every
+ * checked POST (Config\Security::$regenerate, true by default). Every
+ * endpoint here returns the new token; this script writes it back into
+ * the page's hidden CSRF field, so later requests - including the normal
+ * password login - send a current token. The autofill request fetches its
+ * options as the page loads; if the visitor submits the login form before
+ * that fetch has returned, the submission is held until the fresh token is
+ * in the form (at most SUBMIT_HOLD_MAX_MS), then sent.
  *
- * A STUCK BROWSER CEREMONY CAN BLOCK EVERY PASSKEY OPERATION ON THE
- * DEVICE - CONFIRMED, REAL BROWSER BEHAVIOR BOTH FEATURES NOW WORK
- * AROUND: a real report showed that choosing a passkey identity in the
- * browser's own picker that ISN'T actually registered with this site -
- * something Feature 2's discoverable request can show, since it
- * displays every identity the platform has for its own ecosystem, not
- * just ones this app knows about - can leave navigator.credentials.get()
- * hanging for the platform's own full internal timeout (observed at
- * roughly 2 minutes) before it finally rejects. Worse: during that
- * entire window, the same report showed the BROWSER ITSELF (not just
- * this script) refusing to start any OTHER WebAuthn ceremony at all,
- * anywhere on the device - including a completely unrelated one, like
- * the normal password login's own separate 2FA challenge, or the OTHER
- * feature in this same file. This package has no way to prevent that
- * browser-level lock - it isn't something a website's own JavaScript
- * can control - but both features now impose their own 20-second
- * client-side timeout (via AbortController), so at least THIS page
- * gives up and re-enables itself with a clear message well before the
- * browser's own much longer timeout would, rather than leaving the UI
- * looking silently stuck for up to two minutes.
- *
- * CSRF TOKEN HANDLING - CONFIRMED, REAL BUG FIXED HERE, and the most
- * likely reason either feature can appear to do "nothing at all," even
- * for a visitor who DOES have a registered passkey: CodeIgniter's own
- * CSRF protection regenerates the token after every single request by
- * default (Config\Security::$regenerate). Each feature's own first
- * request (options()) is itself a POST, so by the time its response
- * comes back, the token has ALREADY changed - meaning a later verify()
- * call (and, separately, the page's own normal password-login form, if
- * the visitor falls back to typing their password) would submit with a
- * now-stale token and get rejected by CodeIgniter's own CSRF filter
- * before ever reaching a controller at all. A CSRF rejection returns
- * an HTML error page, not JSON - calling .json() on that throws, which
- * both features' own error handling swallows (Feature 1 silently,
- * Feature 2 by showing a generic status message), so this can fail
- * with no server-side log at all (the request never reached PHP code
- * that could log anything). Every relevant server response includes
- * the current token; this file updates one shared tracked copy after
- * every response from either feature, and writes it back into the
- * page's actual hidden CSRF field - so any later call from either
- * feature, and a fallback to the normal password form, always submit
- * with a valid, current token.
- *
- * ADJUST THESE TO MATCH YOUR ACTUAL LOGIN PAGE:
- *   - CSRF_FIELD_NAME (shared): must match Config\Security::$tokenName
- *     in your app (CodeIgniter's default is 'csrf_test_name').
- *   - EMAIL_FIELD_SELECTOR / PASSWORD_FIELD_SELECTOR (Feature 1 only).
- *   - BUTTON_SELECTOR / STATUS_SELECTOR (Feature 2 only).
- *   - The four route paths if you changed the route names in
- *     routes-snippet.php from the defaults.
- *
- * IF EITHER FEATURE SILENTLY DOES NOTHING (no browser prompt ever
- * appears, no error in the console either): CONFIRMED, REAL ISSUE
- * against a real app - check app/Config/Filters.php's $globals for a
- * login-required filter (e.g. 'session' or 'isLoggedIn'). If it's
- * applied globally, its own 'except' list needs to cover all four
- * routes below too, or the filter redirects them to your login page (a
- * 303) before either controller is ever reached - fetch() follows that
- * redirect silently and receives HTML back where JSON was expected.
- * Placing these routes under auth/a/... (routes-snippet.php's default)
- * already matches the exclusion pattern many Shield apps use for
- * Shield's own gateway-action routes - but check your own app's actual
- * exclusion list rather than assuming this is automatic.
+ * IF NOTHING HAPPENS AT ALL (no passkeys offered, no errors): check
+ * app/Config/Filters.php's $globals for a login-required filter (e.g.
+ * 'session'). If it's applied globally, its 'except' list must cover the
+ * two routes below, or the filter redirects them to the login page and
+ * this script receives HTML where it expected JSON. The routes-snippet.php
+ * defaults live under auth/a/..., which many Shield apps already exclude.
  */
 (function () {
     'use strict';
 
-    // ---- Shared configuration ----
+    // ---- Adjust these to match your login page ------------------------------
+
+    // Must match Config\Security::$tokenName (CodeIgniter's default shown).
     var CSRF_FIELD_NAME = 'csrf_test_name';
 
-    // ---- Shared state ----
+    // The login form's email (or username) field - Feature 1 offers passkeys
+    // in this field's autofill. The script adds the "webauthn" token to its
+    // autocomplete attribute if it's missing (e.g. "email" becomes
+    // "email webauthn"); putting it in your markup yourself is equally fine.
+    var EMAIL_FIELD_SELECTOR = 'input[name="email"]';
 
-    // The CSRF token's current value, as far as this file knows - null
-    // until the first server response (from either feature) tells us
-    // otherwise, in which case the page's own initial hidden field
-    // value is used. See "CSRF TOKEN HANDLING" above.
+    // Feature 2's button and an optional element for status messages.
+    var BUTTON_SELECTOR = '#passkey-discoverable-login';
+    var STATUS_SELECTOR = '#passkey-discoverable-status';
+
+    // Change these if you changed the routes in routes-snippet.php.
+    var OPTIONS_URL = '/auth/a/passkey-discoverable/options';
+    var VERIFY_URL  = '/auth/a/passkey-discoverable/verify';
+
+    // How long the button's picker may stay open before this page gives up
+    // and re-enables itself. Choosing a passkey the site doesn't know can
+    // leave some browsers waiting for minutes - see the README.
+    var BUTTON_TIMEOUT_MS = 20000;
+
+    // Longest a login-form submission is held while an options request is
+    // still on its way back (see "CSRF TOKEN HANDLING").
+    var SUBMIT_HOLD_MAX_MS = 10000;
+
+    // -------------------------------------------------------------------------
+
+    var emailField = document.querySelector(EMAIL_FIELD_SELECTOR);
+    var button     = document.querySelector(BUTTON_SELECTOR);
+    var statusEl   = document.querySelector(STATUS_SELECTOR);
+    var loginForm  = emailField ? emailField.form : null;
+
+    if (typeof window.PublicKeyCredential === 'undefined') {
+        if (button) {
+            button.style.display = 'none';
+        }
+
+        return; // No WebAuthn support - leave the page exactly as it is.
+    }
+
+    // The CSRF token as far as this script knows - null until the first
+    // response arrives, in which case the page's hidden field is used.
     var currentCsrfValue = null;
 
-    // True while EITHER feature has an active ceremony in flight - see
-    // "WHY THESE TWO WERE COMBINED INTO ONE FILE" above for what this
-    // prevents.
-    var ceremonyInProgress = false;
-
-    // CONFIRMED, REAL BUG FIXED HERE: a real report showed the
-    // browser's native passkey prompt appearing on the 2FA challenge
-    // page - AFTER a normal email+password login had already been
-    // submitted and navigated away from this page entirely. Root
-    // cause: if the normal login form is submitted (e.g. the visitor
-    // clicks "login" immediately after their email and password arrive
-    // via autofill, without ever tabbing through fields manually)
-    // WHILE either feature's own options() fetch is still in flight,
-    // that feature's own AbortController does not exist yet -
-    // aborting has nothing to call .abort() on, so it silently does
-    // nothing. The still-running async function then goes on to call
-    // navigator.credentials.get() AFTER the browser has already begun
-    // navigating to the next page - and since the browser's own
-    // native dialog is chrome-level UI, not part of the page's own
-    // DOM, it can still render even once the new page has loaded,
-    // appearing as a confusing, unexpected extra prompt there. Shared
-    // across both features (rather than local to just the email-blur
-    // one) since either could, in principle, still be running when the
-    // normal login form gets submitted - checked independently of
-    // whether either feature's own AbortController happens to exist
-    // yet, closing this gap regardless of timing.
+    // Set once the normal login form has been submitted - nothing new is
+    // started after that.
     var formSubmitted = false;
 
-    /**
-     * Reads csrfHash from a server response (every endpoint from
-     * either feature always includes it) and updates both this file's
-     * own tracked value AND the page's actual hidden CSRF field, so a
-     * subsequent call from either feature, or a fallback to the normal
-     * password-login form, all submit with a current token rather than
-     * the one the page happened to render with initially.
-     */
+    // The AbortController for the background autofill request, while one
+    // is running.
+    var autofillController = null;
+
+    // True while the button's picker is open.
+    var buttonInProgress = false;
+
+    // Settles when every options request currently in flight has returned
+    // (and written its fresh CSRF token into the form); null when none is.
+    var pendingOptions = null;
+
+    // ---- CSRF helpers ----------------------------------------------------------
+
     function updateCsrfToken(data) {
         if (!data || typeof data.csrfHash !== 'string') {
             return;
@@ -210,462 +142,318 @@
         return tokenField ? CSRF_FIELD_NAME + '=' + encodeURIComponent(tokenField.value) : '';
     }
 
-    // =========================================================================
-    // FEATURE 1 DETAIL: trigger a passkey prompt on email-field blur
-    // =========================================================================
-    //
-    // WHAT THIS DOES, end to end:
-    //   1. User types their email, then tabs to the password field (or
-    //      clicks elsewhere) - the blur event fires.
-    //   2. This asks the server (passkey-early-auth-options) whether
-    //      that email has a registered passkey. The response never
-    //      reveals whether the email exists at all if it doesn't - see
-    //      PasskeyEarlyAuthController's own doc comment.
-    //   3. If a passkey is available, the browser's native passkey
-    //      prompt appears (navigator.credentials.get()) - the user
-    //      authenticates with their fingerprint/face/PIN/security key,
-    //      never typing a password at all.
-    //   4. The result is sent to the server (passkey-early-auth-verify)
-    //      for verification; on success, the browser is redirected
-    //      straight to wherever a normal login would have gone (or to
-    //      the MFA challenge page, if
-    //      Config\PasskeyMfa::$earlyAuthenticationIsSufficient is off).
-    //   5. ANY failure at any step (no passkey available, the user
-    //      cancels the browser's prompt, a network error, verification
-    //      failure) falls through SILENTLY - the visitor simply
-    //      continues with normal password login, exactly as if this
-    //      feature weren't here at all. This must never block or
-    //      visibly interrupt the form.
-    //
-    // CANCELLING - CONFIRMED, REAL FIX for prompts being hard to cancel
-    // out of, or reappearing after cancelling: this actively aborts any
-    // in-flight passkey ceremony (via navigator.credentials.get()'s own
-    // "signal" option - the same AbortController-based mechanism MDN's
-    // own docs and libraries like SimpleWebAuthn use for exactly this)
-    // the moment the visitor types into the password field, or submits
-    // the form - they are never required to manually dismiss the
-    // browser's own dialog. Two distinct problems were involved, both
-    // fixed here: (1) an earlier version's re-trigger guard (a plain
-    // "in progress" flag) only prevented a SECOND ceremony while the
-    // first was still running - it did nothing to stop the SAME email
-    // value from triggering ANOTHER prompt on a later, separate blur
-    // event (e.g. the visitor clicking back into the email field while
-    // trying to dismiss the first prompt, then tabbing out again) - now
-    // tracked per-value instead, so the identical email never
-    // re-prompts twice; (2) starting a second
-    // navigator.credentials.get() call while a first one is still
-    // pending is a well-documented source of "operation already in
-    // progress" errors and overlapping/duplicate browser dialogs in
-    // some browsers - aborting the first ceremony before it would ever
-    // be allowed to overlap with anything prevents this outright.
-    //
-    // SUSPECTED, NOT FULLY CONFIRMED - EDGE-SPECIFIC ABORT ISSUE: an
-    // earlier version also aborted on the password field's own 'focus'
-    // event (not just 'input'). A real report showed the ceremony
-    // completing successfully in Edge specifically (the visitor sees
-    // the browser's own success indication), but the later verify()
-    // call never firing, with nothing visible in the console -
-    // consistent with something aborting the in-flight
-    // navigator.credentials.get() call between it succeeding and the
-    // next line running, which would reject the promise with an
-    // AbortError that the catch block below would otherwise swallow
-    // silently. 'focus' was the more likely of the two listeners to
-    // fire from browser-internal dialog/focus management rather than a
-    // genuine, deliberate user action - 'input' requires the visitor to
-    // actually type something, a much less ambiguous signal. Removed as
-    // the most likely fix; the console.warn() below is also active by
-    // default (not commented out) for exactly this reason - an earlier
-    // version had it commented out, which is what made this failure
-    // invisible to diagnose in the first place.
-    //
-    // ADJUST for your login form: EMAIL_FIELD_SELECTOR,
-    // PASSWORD_FIELD_SELECTOR, and the two route paths below if changed
-    // from routes-snippet.php's defaults.
-    (function setupEarlyAuthentication() {
-        var EMAIL_FIELD_SELECTOR    = 'input[name="email"]';
-        var PASSWORD_FIELD_SELECTOR = 'input[name="password"]';
-        var OPTIONS_URL             = '/auth/a/passkey-early/options';
-        var VERIFY_URL              = '/auth/a/passkey-early/verify';
+    // ---- Server calls ------------------------------------------------------------
 
-        var emailField    = document.querySelector(EMAIL_FIELD_SELECTOR);
-        var passwordField = document.querySelector(PASSWORD_FIELD_SELECTOR);
+    // Never aborted part-way: once this POST reaches the server it has used
+    // up the page's CSRF token, and the fresh one only arrives in its
+    // response - cancelling it would leave the page with no valid token.
+    // Callers that no longer want the result simply ignore it. Waits for any
+    // options request already in flight first, so it sends the newest token.
+    async function fetchOptions() {
+        if (pendingOptions !== null) {
+            await pendingOptions;
+        }
 
-        // Feature-detect WebAuthn support, and bail out entirely if the
-        // login page doesn't have the field this feature expects -
-        // never throw or interfere with the page if either is missing.
-        if (!emailField || typeof window.PublicKeyCredential === 'undefined') {
+        var request = fetch(OPTIONS_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: csrfBodyParam(),
+        }).then(function (response) {
+            if (!response.ok) {
+                var error = new Error('Passkey login is not available (HTTP ' + response.status + ').');
+                error.name = 'UnavailableError';
+                throw error;
+            }
+
+            return response.json();
+        }).then(function (data) {
+            updateCsrfToken(data);
+
+            return data;
+        });
+
+        trackPendingOptions(request);
+
+        return request;
+    }
+
+    function trackPendingOptions(request) {
+        var settled = request.then(function () {}, function () {});
+        var tracker = pendingOptions === null ? settled : Promise.all([pendingOptions, settled]);
+
+        pendingOptions = tracker;
+
+        tracker.then(function () {
+            if (pendingOptions === tracker) {
+                pendingOptions = null;
+            }
+        });
+    }
+
+    // Not abortable either, for the same CSRF-token reason as fetchOptions().
+    async function verifyCredential(credential) {
+        var response = await fetch(VERIFY_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'credential=' + encodeURIComponent(JSON.stringify(credential.toJSON())) + '&' + csrfBodyParam(),
+        });
+
+        var data = await response.json();
+        updateCsrfToken(data);
+
+        return data;
+    }
+
+    function setStatus(message) {
+        if (statusEl) {
+            statusEl.textContent = message;
+        }
+    }
+
+    // ---- Feature 1: passkey autofill ------------------------------------------------
+
+    function ensureWebauthnAutocomplete(field) {
+        var tokens = (field.getAttribute('autocomplete') || '').trim().split(/\s+/).filter(function (token) {
+            return token !== '' && token.toLowerCase() !== 'webauthn';
+        });
+
+        if (tokens.length === 0 || tokens[0].toLowerCase() === 'on' || tokens[0].toLowerCase() === 'off') {
+            tokens = ['username'];
+        }
+
+        tokens.push('webauthn');
+        field.setAttribute('autocomplete', tokens.join(' '));
+    }
+
+    async function autofillSupported() {
+        if (typeof PublicKeyCredential.isConditionalMediationAvailable !== 'function') {
+            return false;
+        }
+
+        try {
+            return await PublicKeyCredential.isConditionalMediationAvailable();
+        } catch (error) {
+            return false;
+        }
+    }
+
+    async function startAutofill() {
+        if (!emailField || formSubmitted || buttonInProgress || autofillController !== null) {
             return;
         }
 
-        // Tracks the email value a ceremony was last attempted for -
-        // NOT just an "in progress" boolean, since the bug this fixes
-        // was specifically about the SAME value re-prompting across
-        // separate, later blur events, not just concurrent ones. A
-        // different email value (e.g. the visitor corrected a typo) is
-        // still always allowed to trigger a fresh attempt.
-        var lastAttemptedEmail = null;
+        if (!(await autofillSupported())) {
+            return;
+        }
 
-        // The AbortController for whichever ceremony is currently in
-        // flight, if any - null whenever none is.
-        var activeAbortController = null;
+        // Checked again: the button could have been clicked, or the form
+        // submitted, while the support check above was awaited.
+        if (formSubmitted || buttonInProgress || autofillController !== null) {
+            return;
+        }
 
-        emailField.addEventListener('blur', function () {
-            var email = emailField.value.trim();
+        ensureWebauthnAutocomplete(emailField);
 
-            if (email === '' || email === lastAttemptedEmail || ceremonyInProgress || formSubmitted) {
+        var controller     = new AbortController();
+        autofillController = controller;
+        var offerAgain     = false;
+
+        try {
+            var optionsData = await fetchOptions();
+
+            if (controller.signal.aborted || formSubmitted) {
                 return;
             }
 
-            lastAttemptedEmail = email;
-            attemptEarlyAuthentication(email);
-        });
+            var publicKey = PublicKeyCredential.parseRequestOptionsFromJSON(optionsData.options);
 
-        // The moment the visitor actually types into the password
-        // field, or submits the form some other way, any in-flight
-        // ceremony is aborted immediately - see "CANCELLING" above for
-        // why this is the actual fix, not just the re-trigger guard.
-        if (passwordField) {
-            passwordField.addEventListener('input', abortActiveCeremony);
-        }
-
-        if (emailField.form) {
-            emailField.form.addEventListener('submit', function () {
-                formSubmitted = true;
-                abortActiveCeremony();
+            // Waits - with no prompt - until the visitor picks a passkey from
+            // the email field's autofill dropdown, or until it's aborted.
+            var credential = await navigator.credentials.get({
+                mediation: 'conditional',
+                publicKey: publicKey,
+                signal: controller.signal,
             });
-        }
 
-        function abortActiveCeremony() {
-            if (activeAbortController) {
-                activeAbortController.abort();
-                activeAbortController = null;
+            autofillController = null;
+            setStatus('');
+
+            var result = await verifyCredential(credential);
+
+            if (result.success) {
+                window.location.href = result.redirect;
+
+                return;
+            }
+
+            setStatus('Could not sign you in with that passkey. Please try again, or use your password instead.');
+
+            // The visitor chose a passkey that didn't verify - offer passkeys
+            // again so they can pick another one.
+            offerAgain = true;
+        } catch (error) {
+            if (!error || error.name !== 'AbortError') {
+                // Anything else (no network, feature switched off
+                // server-side, a browser quirk) just leaves the page as a
+                // normal password form - never retried automatically, so a
+                // persistent failure can't loop.
+                console.warn('Passkey autofill stopped (' + (error && error.name ? error.name : 'unknown error') + '):', error);
+            }
+        } finally {
+            if (autofillController === controller) {
+                autofillController = null;
             }
         }
 
-        async function attemptEarlyAuthentication(email) {
-            ceremonyInProgress = true;
-
-            try {
-                var optionsResponse = await fetch(OPTIONS_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: 'email=' + encodeURIComponent(email) + '&' + csrfBodyParam(),
-                });
-
-                if (!optionsResponse.ok) {
-                    return; // e.g. 404 because the feature is disabled server-side
-                }
-
-                var optionsData = await optionsResponse.json();
-                updateCsrfToken(optionsData);
-
-                if (!optionsData.available) {
-                    return; // no passkey for this email - let them type their password
-                }
-
-                if (formSubmitted) {
-                    // THE actual fix for the bug described above -
-                    // checked here specifically because this is the
-                    // last point before the browser's own native prompt
-                    // would be triggered, and it does not depend on
-                    // activeAbortController already existing the way
-                    // abortActiveCeremony() does.
-                    return;
-                }
-
-                // parseRequestOptionsFromJSON() is the WebAuthn Level 3
-                // JSON helper - see this package's README ("Browser
-                // support for the client-side JavaScript") for the
-                // specific browser versions this requires.
-                var publicKey = PublicKeyCredential.parseRequestOptionsFromJSON(optionsData.options);
-
-                // A fresh AbortController for THIS specific ceremony -
-                // abortActiveCeremony() (above) can cancel it the
-                // instant the visitor moves on, without them ever
-                // needing to manually dismiss the browser's own dialog.
-                activeAbortController = new AbortController();
-
-                // CONFIRMED, REAL BROWSER BEHAVIOR THIS WORKS AROUND -
-                // see the identical timeout in this file's Feature 2
-                // section for the full explanation: a stuck
-                // navigator.credentials.get() call (e.g. from an
-                // unusual identity-selection scenario) can hang for the
-                // platform's own full internal timeout (observed at
-                // roughly 2 minutes), and during that window the
-                // browser itself may refuse to start ANY other WebAuthn
-                // ceremony at all, anywhere on the device. This timeout
-                // means this feature gives up well before that. Tracked
-                // separately from a genuine user cancellation
-                // (timedOut, below) specifically so lastAttemptedEmail
-                // is only cleared for THIS case - a real cancellation
-                // should still leave it set, or the earlier fix for
-                // "cancelling, then re-blurring the same untouched
-                // email re-prompts again" would regress right back.
-                var timedOut  = false;
-                var timeoutId = setTimeout(function () {
-                    timedOut = true;
-                    abortActiveCeremony();
-                }, 20000); // 20s
-
-                // Opens the browser's native passkey prompt. Rejects if
-                // the user cancels/dismisses it, if
-                // abortActiveCeremony() fires (including via the
-                // timeout above), or on various other WebAuthn errors -
-                // caught below, always falling through silently either
-                // way.
-                var credential = await navigator.credentials.get({
-                    publicKey: publicKey,
-                    signal: activeAbortController.signal,
-                });
-
-                clearTimeout(timeoutId);
-                activeAbortController = null;
-
-                var verifyResponse = await fetch(VERIFY_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: 'credential=' + encodeURIComponent(JSON.stringify(credential.toJSON())) + '&' + csrfBodyParam(),
-                });
-
-                var verifyData = await verifyResponse.json();
-                updateCsrfToken(verifyData);
-
-                if (verifyData.success) {
-                    window.location.href = verifyData.redirect;
-                }
-                // A failed verification also falls through silently -
-                // the visitor still has their password to fall back
-                // on, and updateCsrfToken() above already made sure
-                // that fallback form still has a current, valid token
-                // to submit with.
-            } catch (error) {
-                clearTimeout(timeoutId);
-                activeAbortController = null;
-
-                if (timedOut) {
-                    // Our own timeout fired, not a deliberate user
-                    // cancellation - clearing this allows a retry for
-                    // the SAME email without the visitor needing to
-                    // first change it, unlike a genuine cancellation
-                    // (see the comment above timedOut's own
-                    // declaration for why those two cases are handled
-                    // differently).
-                    lastAttemptedEmail = null;
-                }
-
-                // Includes the user cancelling the browser's own
-                // passkey prompt (error.name === 'NotAllowedError',
-                // typically), this script itself aborting the ceremony
-                // via abortActiveCeremony() (error.name ===
-                // 'AbortError', including via the timeout above), or
-                // any other WebAuthn error. Deliberately does NOT block
-                // or visibly interrupt the form either way - the
-                // visitor always still has their password to fall back
-                // on - but DOES log to the console, client-side only
-                // (visible in the browser's own DevTools, not to the
-                // visitor, and not sent anywhere) - see "SUSPECTED...
-                // EDGE-SPECIFIC ABORT ISSUE" above for why this is
-                // active by default rather than commented out.
-                console.warn('Early passkey authentication skipped (' + (error && error.name ? error.name : 'unknown error') + '):', error);
-            } finally {
-                ceremonyInProgress = false;
-            }
+        if (offerAgain) {
+            startAutofill();
         }
-    })();
+    }
 
-    // =========================================================================
-    // FEATURE 2 DETAIL: "Login with a passkey" button (no email needed)
-    // =========================================================================
-    //
-    // HOW THIS DIFFERS FROM FEATURE 1: that one needs the visitor's
-    // email BEFORE it can ask the server which credentials to offer
-    // (allowCredentials). This one needs nothing at all up front - the
-    // button click alone is the trigger, no allowCredentials is sent,
-    // and the browser's own passkey picker shows whichever discoverable
-    // credentials it has for this site, across every account. The
-    // server figures out who logged in from whichever credential the
-    // browser actually used - see PasskeyDiscoverableAuthController's
-    // own doc comment for the security design behind that.
-    //
-    // WHAT THIS DOES, end to end:
-    //   1. Visitor clicks the button.
-    //   2. This asks the server (passkey-discoverable-auth-options) for
-    //      a fresh challenge - no email or username involved at all.
-    //   3. The browser's native passkey picker appears
-    //      (navigator.credentials.get(), no allowCredentials) - the
-    //      visitor picks whichever passkey they want to use for this
-    //      site and authenticates with it.
-    //   4. The result is sent to the server
-    //      (passkey-discoverable-auth-verify) for verification; on
-    //      success, the browser is redirected straight to wherever a
-    //      normal login would have gone (or to the MFA challenge page,
-    //      if Config\PasskeyMfa::$earlyAuthenticationIsSufficient is
-    //      off - shared with Feature 1's own equivalent setting).
-    //   5. ANY failure at any step (the visitor cancels the browser's
-    //      own picker, no matching credential, a network error,
-    //      verification failure) is shown via the status element below,
-    //      and the button is re-enabled so they can try again or use
-    //      their password instead - this never permanently blocks the
-    //      login page.
-    //
-    // IF THE PICKER APPEARS BUT SHOWS NO PASSKEYS FOR THIS SITE, even
-    // though the visitor has one registered: their credential may not
-    // have been created as "discoverable" - see
-    // Config\PasskeyMfa::$residentKeyRequirement's own doc comment. This
-    // is a real, known limitation for credentials registered before
-    // that setting existed, not a bug in this script.
-    //
-    // ADJUST for your login page: BUTTON_SELECTOR, STATUS_SELECTOR, and
-    // the two route paths below if changed from routes-snippet.php's
-    // defaults.
-    (function setupDiscoverableAuthentication() {
-        var BUTTON_SELECTOR = '#passkey-discoverable-login';
-        var STATUS_SELECTOR = '#passkey-discoverable-status';
-        var OPTIONS_URL      = '/auth/a/passkey-discoverable/options';
-        var VERIFY_URL       = '/auth/a/passkey-discoverable/verify';
+    function stopAutofill() {
+        if (autofillController !== null) {
+            autofillController.abort();
+            autofillController = null;
+        }
+    }
 
-        var button = document.querySelector(BUTTON_SELECTOR);
+    // ---- Feature 2: "Login with a passkey" button ------------------------------------
 
-        // Feature-detect WebAuthn support, and bail out entirely if the
-        // login page doesn't have the button this feature expects -
-        // never throw or interfere with the page if either is missing.
-        if (!button || typeof window.PublicKeyCredential === 'undefined') {
-            if (button) {
-                button.style.display = 'none';
-            }
-
+    async function signInWithButton() {
+        if (buttonInProgress || formSubmitted) {
             return;
         }
 
-        var statusEl = document.querySelector(STATUS_SELECTOR);
+        buttonInProgress = true;
+        button.disabled  = true;
+        setStatus('');
 
-        button.addEventListener('click', function () {
-            if (ceremonyInProgress || formSubmitted) {
-                return; // avoids a second overlapping navigator.credentials.get() call
+        // A browser allows one passkey request at a time.
+        stopAutofill();
+
+        var controller = new AbortController();
+        var timeoutId  = setTimeout(function () {
+            controller.abort();
+        }, BUTTON_TIMEOUT_MS);
+
+        var navigating = false;
+
+        try {
+            var optionsData = await fetchOptions();
+
+            if (formSubmitted) {
+                return;
             }
 
-            attempt();
-        });
+            if (controller.signal.aborted) {
+                setStatus('That took too long - please try again, or use your password instead.');
 
-        async function attempt() {
-            ceremonyInProgress = true;
-            button.disabled    = true;
-            setStatus('');
+                return;
+            }
 
-            // CONFIRMED, REAL BROWSER BEHAVIOR THIS WORKS AROUND: a
-            // real report showed that selecting a passkey identity NOT
-            // actually registered with this site - visible in the
-            // browser's own picker, since a discoverable request shows
-            // every identity the platform has for its own ecosystem,
-            // not just ones this app knows about - can leave
-            // navigator.credentials.get() hanging for the PLATFORM's
-            // own full internal timeout (observed at roughly 2
-            // minutes) before it finally rejects. Worse, during that
-            // entire window the same report showed the BROWSER ITSELF
-            // (not just this script) refusing to start any OTHER
-            // WebAuthn ceremony at all, anywhere on the device -
-            // including a completely unrelated one, like the normal
-            // password login's own separate 2FA challenge. This
-            // package has no way to prevent that browser-level lock -
-            // it isn't something a website's own JavaScript can
-            // control - but this timeout at least means THIS button
-            // gives up and re-enables itself well before the
-            // browser's own timeout would, with a clear message,
-            // rather than leaving the page looking silently stuck for
-            // up to two minutes.
-            var timeoutController = new AbortController();
-            var timeoutId         = setTimeout(function () {
-                timeoutController.abort();
-            }, 20000); // 20s - generous for a genuine visitor picking a passkey, short enough not to feel broken
+            var publicKey  = PublicKeyCredential.parseRequestOptionsFromJSON(optionsData.options);
+            var credential = await navigator.credentials.get({
+                publicKey: publicKey,
+                signal: controller.signal,
+            });
 
+            var result = await verifyCredential(credential);
+
+            if (result.success) {
+                navigating = true;
+                window.location.href = result.redirect;
+
+                return;
+            }
+
+            setStatus('Could not sign you in with that passkey. Please try again, or use your password instead.');
+        } catch (error) {
+            if (error && error.name === 'AbortError') {
+                setStatus('That took too long - please try again, or use your password instead.');
+            } else if (error && error.name === 'UnavailableError') {
+                setStatus('This login option is not currently available.');
+            } else if (error && error.name !== 'NotAllowedError') {
+                // NotAllowedError is the visitor cancelling the picker - no
+                // message needed for that.
+                setStatus('Something went wrong signing you in with a passkey. Please try again, or use your password instead.');
+                console.warn('Passkey button sign-in failed:', error);
+            }
+        } finally {
+            clearTimeout(timeoutId);
+            buttonInProgress = false;
+            button.disabled  = false;
+
+            if (!navigating) {
+                startAutofill();
+            }
+        }
+    }
+
+    // ---- The normal password login ---------------------------------------------------
+
+    function isSubmitControlOf(element, form) {
+        return !!element && element.form === form && (element.type === 'submit' || element.type === 'image');
+    }
+
+    function resubmit(form, submitter) {
+        if (typeof form.requestSubmit === 'function') {
             try {
-                var optionsResponse = await fetch(OPTIONS_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: csrfBodyParam(),
-                    signal: timeoutController.signal,
-                });
+                form.requestSubmit(isSubmitControlOf(submitter, form) ? submitter : undefined);
 
-                if (!optionsResponse.ok) {
-                    setStatus('This login option is not currently available.');
-
-                    return; // e.g. 404 because the feature is disabled server-side
-                }
-
-                var optionsData = await optionsResponse.json();
-                updateCsrfToken(optionsData);
-
-                if (formSubmitted) {
-                    // Shared with Feature 1's identical check - see
-                    // formSubmitted's own declaration (shared state,
-                    // top of file) for the full explanation. The normal
-                    // login form was submitted while this was still
-                    // waiting on options() - don't trigger the native
-                    // prompt on what's about to be a different page.
-                    return;
-                }
-
-                // parseRequestOptionsFromJSON() is the WebAuthn Level 3
-                // JSON helper - see this package's README ("Browser
-                // support for the client-side JavaScript") for the
-                // specific browser versions this requires.
-                var publicKey = PublicKeyCredential.parseRequestOptionsFromJSON(optionsData.options);
-
-                // No allowCredentials at all - the browser's own picker
-                // shows whichever discoverable credentials it has for
-                // this site's rpId, across every account.
-                var credential = await navigator.credentials.get({
-                    publicKey: publicKey,
-                    signal: timeoutController.signal,
-                });
-
-                var verifyResponse = await fetch(VERIFY_URL, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: 'credential=' + encodeURIComponent(JSON.stringify(credential.toJSON())) + '&' + csrfBodyParam(),
-                    signal: timeoutController.signal,
-                });
-
-                var verifyData = await verifyResponse.json();
-                updateCsrfToken(verifyData);
-
-                if (verifyData.success) {
-                    window.location.href = verifyData.redirect;
-
-                    return;
-                }
-
-                setStatus('Could not sign you in with that passkey. Please try again, or use your password instead.');
+                return;
             } catch (error) {
-                if (error && error.name === 'AbortError') {
-                    // This is OUR OWN timeout firing (see above), not
-                    // the visitor cancelling anything - the browser's
-                    // own ceremony was still hanging after 20 seconds.
-                    setStatus('That took too long - please try again, or use your password instead.');
-                } else if (error && error.name !== 'NotAllowedError') {
-                    // NotAllowedError (visitor cancelling the browser's
-                    // own picker, most commonly) is a normal, expected
-                    // outcome, not treated as a genuine failure
-                    // message.
-                    setStatus('Something went wrong signing you in with a passkey. Please try again, or use your password instead.');
-                }
-
-                // Client-side only (visible in the browser's own
-                // DevTools, not to the visitor, and not sent anywhere)
-                // - uncomment during development if you need to see
-                // exactly what went wrong:
-                // console.warn('Discoverable passkey login skipped (' + (error && error.name ? error.name : 'unknown error') + '):', error);
-            } finally {
-                clearTimeout(timeoutId);
-                ceremonyInProgress = false;
-                button.disabled    = false;
+                // Fall back to submit() below.
             }
         }
 
-        function setStatus(message) {
-            if (statusEl) {
-                statusEl.textContent = message;
+        form.submit();
+    }
+
+    var submitHeld = false;
+
+    if (loginForm) {
+        loginForm.addEventListener('submit', function (event) {
+            formSubmitted = true;
+            stopAutofill();
+
+            // An options request is still on its way back, and it has
+            // already used up the token this form is about to send. Hold the
+            // submission until the fresh token is in the form.
+            if (pendingOptions !== null && !submitHeld) {
+                event.preventDefault();
+                submitHeld = true;
+
+                var submitter = event.submitter || null;
+                var timeout   = new Promise(function (resolve) {
+                    setTimeout(resolve, SUBMIT_HOLD_MAX_MS);
+                });
+
+                Promise.race([pendingOptions, timeout]).then(function () {
+                    resubmit(loginForm, submitter);
+                });
             }
+        });
+    }
+
+    // ---- Start up ----------------------------------------------------------------------
+
+    if (button) {
+        button.addEventListener('click', function (event) {
+            event.preventDefault(); // in case the button sits inside the login form
+            signInWithButton();
+        });
+    }
+
+    // Coming back to the login page with the browser's Back button can
+    // restore it from the page cache with this script's state intact -
+    // reset it so autofill works again.
+    window.addEventListener('pageshow', function (event) {
+        if (event.persisted) {
+            formSubmitted = false;
+            submitHeld    = false;
+            startAutofill();
         }
-    })();
+    });
+
+    startAutofill();
 })();

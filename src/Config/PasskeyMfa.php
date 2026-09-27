@@ -69,65 +69,51 @@ class PasskeyMfa extends BaseConfig
      */
     public string $stepUpEnrollRouteName = 'passkey-settings-enroll';
 
-    // -- Optional: trigger a passkey prompt from the login form -------------
+    // -- Optional: passkey sign-in on the login page ----------------------
 
     /**
-     * Off by default - a genuinely different UX/security shape from
-     * this package's main job (a SECOND factor after a password), so
-     * it's opt-in even once PasskeyEarlyAuthController's routes are
-     * added, not automatic.
+     * Off by default. When true, the login page's email field offers the
+     * visitor's passkeys in the browser's own autofill dropdown
+     * ("conditional UI"), next to any saved usernames. Choosing one signs
+     * them in; anyone else types their email and password as normal.
+     * Nothing ever pops up on its own.
      *
-     * When true, exposes two endpoints a developer can call from their
-     * OWN login page's JavaScript - typically wired to fire on blur of
-     * the email field, so a returning user with a registered passkey
-     * gets the browser's native passkey prompt immediately, before
-     * ever touching the password field (the same pattern GitHub,
-     * Microsoft, and others use). See "Optional: trigger a passkey
-     * prompt from the login form" in the README for the full setup,
-     * including the example JavaScript this package ships but does
-     * NOT auto-inject anywhere - you choose whether and how to wire it
-     * into your own login page's markup.
+     * Needs the passkey-discoverable-auth-options / -verify routes from
+     * routes-snippet.php and this package's passkey-login.js on your
+     * login page - see "Optional: passkey sign-in on the login page" in
+     * the README. Works only with discoverable passkeys (see
+     * $residentKeyRequirement below).
+     *
+     * Replaces the earlier $enableEarlyAuthentication option (prompt when
+     * the email field loses focus), which was removed: a prompt it had
+     * already started could still appear after the visitor had clicked the
+     * normal login button, even on the next page.
      */
-    public bool $enableEarlyAuthentication = false;
+    public bool $enablePasskeyAutofill = false;
 
     /**
-     * Whether a successful passkey login that bypasses Shield's normal
-     * Session::attempt() flow completes login OUTRIGHT, or still
-     * requires whatever your app's own MFA would otherwise apply (e.g.
-     * shield-mfa-dispatcher). Shared by BOTH
-     * $enableEarlyAuthentication (above) and
-     * $enableDiscoverableAuthentication (below) - the underlying
-     * question ("is a verified passkey sufficient on its own, or
-     * should MFA still apply") is the same regardless of which UI
-     * triggered the passkey ceremony, so this one setting controls
-     * both rather than needing a separate, identical toggle for each.
+     * Whether a successful passkey sign-in on the login page (autofill or
+     * the "Login with a passkey" button) completes login OUTRIGHT, or
+     * still requires whatever your app's own MFA would otherwise apply
+     * (e.g. shield-mfa-dispatcher). Applies to both $enablePasskeyAutofill
+     * (above) and $enableDiscoverableAuthentication (below).
      *
-     * Defaults to true - unlike shield-oauth-login's equivalent toggle
-     * ($triggerMfaAfterSso, which defaults to STILL requiring MFA),
-     * this one defaults the other way: a passkey is already a strong,
-     * phishing-resistant credential that's inherently multi-factor
-     * (possession of the device + its own biometric/PIN unlock) and
-     * verified DIRECTLY by this app, not delegated to a third-party
-     * IdP whose own security posture this app has no way to verify.
-     * Treating it as sufficient on its own is a more defensible
-     * default here. Still your call - set to false to layer your own
-     * MFA on top regardless.
+     * Defaults to true: a passkey is already a strong, phishing-resistant
+     * credential that is inherently multi-factor (possession of the device
+     * plus its own biometric/PIN unlock) and is verified directly by this
+     * app. Set to false to layer your own MFA on top regardless.
      */
     public bool $earlyAuthenticationIsSufficient = true;
 
     // -- Optional: "Login with a passkey" button (no email needed) ----------
 
     /**
-     * Off by default - like $enableEarlyAuthentication, a genuinely
-     * different UX/security shape from this package's main job, so
-     * it's opt-in even once PasskeyDiscoverableAuthController's routes
-     * are added, not automatic. Distinct from
-     * $enableEarlyAuthentication: that feature still needs the
-     * visitor's email up front (to look up which credentials to
-     * offer); this one needs no username or email at all - the
-     * visitor clicks a button, the browser's own passkey picker shows
-     * whichever credentials it has for your site, and the server
-     * identifies who they are from whichever one they choose. Requires
+     * Off by default. When true, the login page can show a "Login with a
+     * passkey" button: the visitor clicks it, the browser's own passkey
+     * picker shows whichever passkeys it has for your site, and the
+     * server identifies who they are from whichever one they choose. Uses
+     * the same endpoints as $enablePasskeyAutofill above - turn on either
+     * or both. Requires
      * "discoverable" (a.k.a. "resident key") credentials - see
      * $residentKeyRequirement below, and "Optional: 'Login with a
      * passkey' button (no email needed)" in the README for the full

@@ -9,23 +9,17 @@ use CodeIgniter\Shield\Entities\User;
 use ReflectionObject;
 
 /**
- * Shared by PasskeyEarlyAuthController and PasskeyDiscoverableAuthController -
- * both complete a login for a user who was verified entirely outside
- * Shield's own Session::attempt() flow (no password was ever checked,
- * since neither controller runs until AFTER a passkey ceremony has
- * already succeeded), and both need the identical mechanism to do it.
- * Extracted here rather than duplicated across the two, since both
- * live in this same package - unlike the cross-PACKAGE duplication
- * pattern used elsewhere in this series (e.g. FakeWhatsAppSender),
- * which is deliberate specifically because those packages are meant to
- * be independently installable.
+ * Used by PasskeyDiscoverableAuthController, which completes a login for a
+ * user verified entirely outside Shield's own Session::attempt() flow (no
+ * password was ever checked - it only runs after a passkey ceremony has
+ * already succeeded, from either passkey autofill or the "Login with a
+ * passkey" button).
  */
 trait CompletesEarlyLogin
 {
     /**
      * Logs the given, already-fully-verified user in. If
-     * $earlyAuthenticationIsSufficient is on (the default for both
-     * features that use this trait), this is a normal, complete login.
+     * $earlyAuthenticationIsSufficient is on (the default), this is a normal, complete login.
      * Otherwise, the user is put into the same "pending MFA" state a
      * real Session::attempt() would have left them in, and the caller
      * should send the browser to the MFA challenge page instead of the

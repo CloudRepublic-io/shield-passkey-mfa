@@ -19,18 +19,21 @@ use PasskeyMfa\Models\PasskeyCredentialModel;
  * Tests the discoverable-authentication controller by calling its
  * methods directly, via initController(), rather than through a full
  * HTTP round-trip - the same approach used throughout this series of
- * packages. As with PasskeyEarlyAuthControllerTest (this file's own
- * closest sibling), the actual cryptographic verification succeeding
+ * packages. The actual cryptographic verification succeeding
  * isn't covered here - see PasskeyIdentityStoreTest's class doc
  * comment for why that's a deliberate, documented limitation across
  * this whole package.
  *
- * No actingAs() anywhere in this file - deliberately, for the same
- * reason as PasskeyEarlyAuthControllerTest: the visitor calling these
- * two endpoints isn't logged in, or even mid-login, at all. Unlike
- * that file, there's no email involved either - identity here comes
- * entirely from whichever credential the (simulated, since real crypto
- * can't be produced here) response claims to be.
+ * No actingAs() anywhere in this file - deliberately: the visitor
+ * calling these two endpoints isn't logged in, or even mid-login, at
+ * all, and no email is involved either - identity comes entirely from
+ * whichever credential the (simulated, since real crypto can't be
+ * produced here) response claims to be.
+ *
+ * These endpoints serve both login-page options - passkey autofill
+ * ($enablePasskeyAutofill) and the "Login with a passkey" button
+ * ($enableDiscoverableAuthentication) - so they must work when either
+ * one is on, and return 404 only when both are off.
  */
 final class PasskeyDiscoverableAuthControllerTest extends CIUnitTestCase
 {
@@ -52,7 +55,23 @@ final class PasskeyDiscoverableAuthControllerTest extends CIUnitTestCase
         // for why this is needed regardless of test execution order.
         Services::routes()->loadRoutes();
 
-        config('PasskeyMfa')->enableDiscoverableAuthentication = true;
+        $config                                   = config('PasskeyMfa');
+        $config->enableDiscoverableAuthentication = true;
+        $config->enablePasskeyAutofill            = false;
+    }
+
+    private function disableBothLoginPageOptions(): void
+    {
+        $config                                   = config('PasskeyMfa');
+        $config->enableDiscoverableAuthentication = false;
+        $config->enablePasskeyAutofill            = false;
+    }
+
+    private function enableOnlyPasskeyAutofill(): void
+    {
+        $config                                   = config('PasskeyMfa');
+        $config->enableDiscoverableAuthentication = false;
+        $config->enablePasskeyAutofill            = true;
     }
 
     private function makeUser(): User
@@ -88,7 +107,10 @@ final class PasskeyDiscoverableAuthControllerTest extends CIUnitTestCase
         $request->setGlobal('post', $post);
 
         $controller = new PasskeyDiscoverableAuthController();
-        $controller->initController($request, service('response'), service('logger'));
+        // A fresh response per controller, as a real request gets: the
+        // shared one keeps whatever status an earlier test left on it
+        // (e.g. 404), and options() never sets 200 explicitly.
+        $controller->initController($request, service('response', null, false), service('logger'));
 
         return $controller;
     }
@@ -98,29 +120,51 @@ final class PasskeyDiscoverableAuthControllerTest extends CIUnitTestCase
         return json_decode($response->getBody(), true);
     }
 
-    public function testOptionsReturns404WhenTheFeatureIsDisabled(): void
+    public function testOptionsReturns404WhenBothLoginPageOptionsAreOff(): void
     {
-        config('PasskeyMfa')->enableDiscoverableAuthentication = false;
+        $this->disableBothLoginPageOptions();
 
         $response = $this->makeController()->options();
 
         $this->assertSame(404, $response->getStatusCode());
     }
 
-    public function testVerifyReturns404WhenTheFeatureIsDisabled(): void
+    public function testVerifyReturns404WhenBothLoginPageOptionsAreOff(): void
     {
-        config('PasskeyMfa')->enableDiscoverableAuthentication = false;
+        $this->disableBothLoginPageOptions();
 
         $response = $this->makeController(['credential' => 'anything'])->verify();
 
         $this->assertSame(404, $response->getStatusCode());
     }
 
+    public function testOptionsWorkWithOnlyPasskeyAutofillEnabled(): void
+    {
+        $this->enableOnlyPasskeyAutofill();
+
+        $response = $this->makeController()->options();
+        $body     = $this->jsonBody($response);
+
+        $this->assertSame(200, $response->getStatusCode());
+        $this->assertArrayHasKey('challenge', $body['options']);
+        $this->assertSame(csrf_token(), $body['csrfName']);
+    }
+
+    public function testVerifyIsReachableWithOnlyPasskeyAutofillEnabled(): void
+    {
+        $this->enableOnlyPasskeyAutofill();
+
+        // No prior options() call, so nothing to verify against - the
+        // point is that it's answered (401), not hidden (404).
+        $response = $this->makeController(['credential' => 'anything'])->verify();
+
+        $this->assertSame(401, $response->getStatusCode());
+    }
+
     /**
-     * Unlike PasskeyEarlyAuthControllerTest's equivalent, there is no
-     * "available: false" case to test here at all - no email is given
-     * up front for this endpoint to check enrollment against, so a
-     * successful call always returns a challenge. Whether the visitor
+     * There is no "available: false" case to test here at all - no email
+     * is given up front for this endpoint to check enrollment against, so
+     * a successful call always returns a challenge. Whether the visitor
      * actually has anything usable is left entirely to the browser's
      * own picker - see options()'s own doc comment for why.
      */

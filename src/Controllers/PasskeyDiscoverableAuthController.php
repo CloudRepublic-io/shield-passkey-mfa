@@ -11,36 +11,34 @@ use PasskeyMfa\Libraries\CompletesEarlyLogin;
 use PasskeyMfa\Libraries\PasskeyIdentityStore;
 
 /**
- * Two AJAX (JSON) endpoints for a "Login with a passkey" button on the
- * login page - unlike PasskeyEarlyAuthController, this needs no email
- * or username at all up front. The visitor clicks the button, the
- * browser's own passkey picker shows whichever discoverable
- * credentials it has for this site, and the server identifies who
- * they are from whichever one they choose. Off entirely unless
- * Config\PasskeyMfa::$enableDiscoverableAuthentication is true - see
- * that property's own doc comment, and "Optional: 'Login with a
- * passkey' button (no email needed)" in the README, for the full
- * picture including the example JavaScript this package ships.
+ * Two AJAX (JSON) endpoints for passkey sign-in on the login page, used
+ * by both of this package's optional login-page features:
  *
- * DISTINCT FROM PasskeyEarlyAuthController: that feature still needs a
- * known email to look up which credentials to offer
- * (allowCredentials); this one deliberately omits that entirely and
- * lets the browser show anything it has for this site, across every
- * account. See PasskeyIdentityStore::beginDiscoverableAuthentication()/
- * completeDiscoverableAuthentication()'s own doc comments for the full
- * WebAuthn and security design detail - notably, the resolved user's
- * identity comes from this server's own trusted credential_id lookup,
- * confirmed only afterward by the cryptographic signature check, never
- * from trusting the assertion response's own userHandle field
- * directly.
+ *   - passkey autofill (Config\PasskeyMfa::$enablePasskeyAutofill): the
+ *     browser offers the visitor's passkeys in the email field's autofill
+ *     dropdown ("conditional UI");
+ *   - the "Login with a passkey" button
+ *     (Config\PasskeyMfa::$enableDiscoverableAuthentication).
  *
- * REQUIRES DISCOVERABLE CREDENTIALS: a passkey only shows up in the
- * browser's own picker for this flow if it was registered as
- * "discoverable" (a.k.a. "resident key") in the first place - see
- * Config\PasskeyMfa::$residentKeyRequirement's own doc comment. Already-
- * registered passkeys may or may not qualify, depending entirely on
- * what the authenticator chose to do at the time - this package cannot
- * detect or guarantee this either way for existing credentials.
+ * Neither needs an email or username up front: the browser shows
+ * whichever discoverable passkeys it has for this site, and the server
+ * identifies who signed in from whichever one they choose. Both endpoints
+ * return 404 unless at least one of the two options is on. See the
+ * README's "Optional: passkey sign-in on the login page", and
+ * passkey-login.js, for the page side.
+ *
+ * See PasskeyIdentityStore::beginDiscoverableAuthentication()/
+ * completeDiscoverableAuthentication() for the WebAuthn and security
+ * design - notably, the resolved user comes from this server's own
+ * trusted credential_id lookup, confirmed by the signature check, never
+ * from trusting the assertion's own userHandle field directly.
+ *
+ * REQUIRES DISCOVERABLE CREDENTIALS: a passkey is only offered in this
+ * flow if it was registered as "discoverable" (a.k.a. "resident key") -
+ * see Config\PasskeyMfa::$residentKeyRequirement. Already-registered
+ * passkeys may or may not qualify, depending on what the authenticator
+ * chose at the time; this package can't detect that for existing
+ * credentials.
  */
 class PasskeyDiscoverableAuthController extends Controller
 {
@@ -57,25 +55,26 @@ class PasskeyDiscoverableAuthController extends Controller
 
     /**
      * No email/username parameter at all, deliberately - see this
-     * class's own doc comment. Always returns options when the feature
-     * is enabled; there's no "available: false" case the way
-     * PasskeyEarlyAuthController has, since no candidate user has been
-     * identified yet to check enrollment against - the browser's own
-     * picker is what determines whether the visitor has anything
-     * usable, not this endpoint.
+     * class's own doc comment. Always returns options when enabled: no
+     * user has been identified yet, so the browser's own picker (or
+     * autofill list) is what decides whether the visitor has anything
+     * usable, not this endpoint. Revealing nothing about accounts also
+     * means it can't be used to probe which emails are registered.
      */
     public function options(): ResponseInterface
     {
-        if (! $this->config->enableDiscoverableAuthentication) {
+        if (! $this->isEnabled()) {
             return $this->response->setStatusCode(404);
         }
 
         $optionsJson = $this->store->beginDiscoverableAuthentication();
 
         // Embeds the raw options JSON string directly rather than
-        // decoding and letting setJSON() re-encode it - see
-        // PasskeyEarlyAuthController::options()'s own doc comment for
-        // the confirmed, real bug this avoids repeating here.
+        // decoding it and letting setJSON() re-encode it. A decode/
+        // re-encode round trip in an earlier login-page feature broke
+        // sign-in once a user had more than one passkey registered (a
+        // generic "problem signing you in" error in Edge), while the MFA
+        // challenge page, which embeds the raw string, kept working.
         $body = '{"options":' . $optionsJson
             . ',"csrfName":' . json_encode(csrf_token())
             . ',"csrfHash":' . json_encode(csrf_hash()) . '}';
@@ -85,7 +84,7 @@ class PasskeyDiscoverableAuthController extends Controller
 
     public function verify(): ResponseInterface
     {
-        if (! $this->config->enableDiscoverableAuthentication) {
+        if (! $this->isEnabled()) {
             return $this->response->setStatusCode(404);
         }
 
@@ -107,5 +106,14 @@ class PasskeyDiscoverableAuthController extends Controller
             'success'  => true,
             'redirect' => $mfaTriggered ? route_to('auth-action-show') : config('Auth')->loginRedirect(),
         ]);
+    }
+
+    /**
+     * Either login-page option uses these endpoints - see this class's
+     * own doc comment.
+     */
+    private function isEnabled(): bool
+    {
+        return $this->config->enablePasskeyAutofill || $this->config->enableDiscoverableAuthentication;
     }
 }
