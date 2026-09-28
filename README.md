@@ -964,6 +964,25 @@ the practical option is reproducing the issue with
 on logging that writes to your real production log (or shows internal
 details to real users) continuously.
 
+## Apps that keep Shield's tables on their own connection (`Config\Auth::$DBGroup`) - fixed
+
+Shield lets you put its tables on a database group other than the
+default one with `Config\Auth::$DBGroup`, and its own models and
+migration follow that setting. This package's `auth_passkey_credentials`
+table didn't: `PasskeyCredentialModel` and the migration that creates the
+table used the default connection.
+
+That only goes wrong when the default connection isn't where the users
+are. A multi-tenant app is the usual case: users live in a central
+database, and each request switches the default connection to the
+current tenant's database. There, every passkey sign-in and settings
+page failed with "table doesn't exist", because it looked in the
+tenant's database.
+
+Both now use `Config\Auth::$DBGroup` when it's set, and the default
+connection when it's `null` (Shield's default). Nothing changes for apps
+that don't set it.
+
 ## Tests
 
 **If you're using `shield-mfa-dispatcher`** (or anything else that
